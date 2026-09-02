@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -95,6 +96,8 @@ static const int SIGNAL_HANDLER_MUTEX_TIMEOUT_SEC = PROCESSDUMP_TIMEOUT;
 static pthread_key_t g_crashObjKey;
 static uint64_t g_crashLogConfig = 0;
 static bool g_crashObjInit = false;
+static pthread_key_t g_binderInfoKey;
+static bool g_binderInfoInit = false;
 static BOOL g_hasInit = FALSE;
 static int g_prevHandledSignal = SIGDUMP;
 static struct sigaction g_oldSigactionList[NSIG] = {};
@@ -267,6 +270,19 @@ static enum ProcessDumpType GetDumpType(int signo, siginfo_t *si)
     }
 }
 
+static void FillCallbackMsg(void *context)
+{
+    ThreadInfoCallBack callback = GetCallbackLocked();
+    if (callback == NULL) {
+        return;
+    }
+    DFXLOGI("Start collect crash thread info.");
+    g_request.msg.type = MESSAGE_CALLBACK;
+    callback(g_callbackMsg, sizeof(g_callbackMsg), context);
+    g_request.msg.addr = (uintptr_t)g_callbackMsg;
+    DFXLOGI("Finish collect crash thread info.");
+}
+
 static bool FillDumpRequest(int signo, siginfo_t *si, void *context, bool isSigAction)
 {
     (void)memset_s(&g_request, sizeof(g_request), 0, sizeof(g_request));
@@ -302,20 +318,15 @@ static bool FillDumpRequest(int signo, siginfo_t *si, void *context, bool isSigA
         case SIGLEAK_STACK:
             ret = FillDebugMessageLocked(signo, si);
             AT_FALLTHROUGH;
-        default: {
-            ThreadInfoCallBack callback = GetCallbackLocked();
-            if (callback != NULL) {
-                DFXLOGI("Start collect crash thread info.");
-                g_request.msg.type = MESSAGE_CALLBACK;
-                callback(g_callbackMsg, sizeof(g_callbackMsg), context);
-                g_request.msg.addr = (uintptr_t)g_callbackMsg;
-                DFXLOGI("Finish collect crash thread info.");
-            }
+        default:
+            FillCallbackMsg(context);
             break;
-        }
     }
     g_request.crashObj = (uintptr_t)pthread_getspecific(g_crashObjKey);
     g_request.crashLogConfig = g_crashLogConfig;
+    if (g_binderInfoInit) {
+        g_request.callerPid = (int32_t)(intptr_t)pthread_getspecific(g_binderInfoKey);
+    }
     return ret;
 }
 
@@ -500,6 +511,17 @@ static void InitSignalHandlerMutex(void)
     pthread_mutexattr_destroy(&mutexAttr);
 }
 
+static void InitThreadKey()
+{
+    g_hasInit = TRUE;
+    if (pthread_key_create(&g_crashObjKey, NULL) == 0) {
+        g_crashObjInit = true;
+    }
+    if (pthread_key_create(&g_binderInfoKey, NULL) == 0) {
+        g_binderInfoInit = true;
+    }
+}
+
 static void DFX_InstallSignalHandler(void)
 {
     if (g_hasInit) {
@@ -542,12 +564,7 @@ static void DFX_InstallSignalHandler(void)
             InstallSigActionHandler(signo);
         }
     }
-
-    g_hasInit = TRUE;
-    if (pthread_key_create(&g_crashObjKey, NULL) == 0) {
-        g_crashObjInit = true;
-    }
-
+    InitThreadKey();
     uint64_t runingId = GenerateRandomUint64();
     if (runingId == 0) {
         DFXLOGE("DFX_InstallSignalHandler :: GenerateRandomUint64 failed");
@@ -601,6 +618,13 @@ void DFX_ResetCrashObj(uintptr_t crashObj)
 #if defined __LP64__
     pthread_setspecific(g_crashObjKey, (void*)(crashObj));
 #endif
+}
+
+void DFX_SetBinderCallerPid(pid_t callerPid)
+{
+    if (g_binderInfoInit) {
+        pthread_setspecific(g_binderInfoKey, (void*)(intptr_t)callerPid);
+    }
 }
 
 static int DFX_SetMinidump(uint32_t config)

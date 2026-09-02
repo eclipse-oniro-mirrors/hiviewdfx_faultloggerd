@@ -79,6 +79,7 @@ bool SocketServer::Init()
     AddService(PIPE_FD_LIMITED_CLIENT, std::make_unique<LiteProcDumperPipeService>());
     AddService(MINIDUMP_CLIENT, std::make_unique<MiniDumpService>());
     AddService(BINDER_PIDS_DUMP_CLIENT, std::make_unique<BinderPidsDumpService>());
+    AddService(PROC_STATUS_QUERY_CLIENT, std::make_unique<ProcStatusInfoService>());
     if (!AddServerListener(SERVER_SDKDUMP_SOCKET_NAME)) {
         return false;
     }

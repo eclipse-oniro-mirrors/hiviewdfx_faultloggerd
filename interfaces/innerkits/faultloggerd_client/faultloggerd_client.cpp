@@ -348,20 +348,60 @@ int32_t RequestBinderPidsDump(int32_t pid, const int32_t binderPids[],
     const int32_t nsBinderPids[], uint32_t count, int* fd)
 {
 #ifndef is_ohos_lite
-    if (pid <= 0 || binderPids == nullptr || nsBinderPids == nullptr || count <= 0 || fd == nullptr) {
+    if (pid <= 0 || fd == nullptr) {
         DFXLOGE("%{public}s.%{public}s :: invalid parameters.", FAULTLOGGERD_CLIENT_TAG, __func__);
         return ResponseCode::DEFAULT_ERROR_CODE;
     }
     struct BinderPidsDumpRequestData request{};
     FillRequestHeadData(request.head, FaultLoggerClientType::BINDER_PIDS_DUMP_CLIENT);
     request.pid = pid;
-    for (uint32_t i = 0; i < count && i < MAX_BINDER_PIDS_COUNT; i++) {
-        request.binderPids[i] = binderPids[i];
-        request.nsBinderPids[i] = nsBinderPids[i];
+    if (count > 0) {
+        if (binderPids == nullptr || nsBinderPids == nullptr) {
+            DFXLOGE("%{public}s.%{public}s :: invalid parameters.", FAULTLOGGERD_CLIENT_TAG, __func__);
+            return ResponseCode::DEFAULT_ERROR_CODE;
+        }
+        for (uint32_t i = 0; i < count && i < MAX_BINDER_PIDS_COUNT; i++) {
+            request.binderPids[i] = binderPids[i];
+            request.nsBinderPids[i] = nsBinderPids[i];
+        }
     }
     SocketRequestData socketRequestData = {&request, sizeof(request)};
     SocketFdData socketFdData = {fd, 1};
     return SendRequestToServer(SERVER_CRASH_SOCKET_NAME, socketRequestData, CRASHDUMP_SOCKET_TIMEOUT, &socketFdData);
+#else
+    return ResponseCode::DEFAULT_ERROR_CODE;
+#endif
+}
+
+int32_t RequestProcStatusInfo(int32_t pid, ProcStatusInfo* info)
+{
+#ifndef is_ohos_lite
+    if (pid < 0 || info == nullptr) {
+        DFXLOGE("%{public}s.%{public}s :: invalid parameters.", FAULTLOGGERD_CLIENT_TAG, __func__);
+        return ResponseCode::DEFAULT_ERROR_CODE;
+    }
+    struct ProcStatusInfoRequestData request{};
+    FillRequestHeadData(request.head, FaultLoggerClientType::PROC_STATUS_QUERY_CLIENT);
+    request.pid = pid;
+    SocketRequestData socketRequestData = {&request, sizeof(request)};
+    FaultLoggerdSocket faultLoggerdSocket;
+    if (!faultLoggerdSocket.InitSocket(SERVER_CRASH_SOCKET_NAME, CRASHDUMP_SOCKET_TIMEOUT)) {
+        return ResponseCode::CONNECT_FAILED;
+    }
+    int32_t retCode = faultLoggerdSocket.RequestServer(socketRequestData);
+    if (retCode != ResponseCode::REQUEST_SUCCESS) {
+        return retCode;
+    }
+    ProcStatusInfoResult result{};
+    if (!faultLoggerdSocket.GetMsgFromSocket(&result, sizeof(result))) {
+        return ResponseCode::RECEIVE_DATA_FAILED;
+    }
+    info->nsPid = result.nsPid;
+    if (memcpy_s(info->name, MAX_PROC_STATUS_NAME_LEN, result.name, MAX_PROC_STATUS_NAME_LEN) != EOK) {
+        DFXLOGE("%{public}s.%{public}s :: failed to copy process name.", FAULTLOGGERD_CLIENT_TAG, __func__);
+    }
+    info->name[MAX_PROC_STATUS_NAME_LEN - 1] = '\0';
+    return ResponseCode::REQUEST_SUCCESS;
 #else
     return ResponseCode::DEFAULT_ERROR_CODE;
 #endif

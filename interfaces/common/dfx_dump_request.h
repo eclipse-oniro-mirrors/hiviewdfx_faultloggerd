@@ -137,6 +137,8 @@ struct ProcessDumpRequest {
     uintptr_t crashObj;
     uint64_t crashLogConfig;
     bool isSigAction;
+    /** binder caller pid, set via DFX_SetBinderInfo TLS */
+    int32_t callerPid;
 #ifndef is_ohos_lite
     /** ffrt coroutine stack begin address, ABI synced with processdump receiver */
     uintptr_t ffrtStackBegin;
