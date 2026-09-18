@@ -32,6 +32,7 @@
 #include "dfx_define.h"
 #include "dfx_log.h"
 #include "epoll_manager.h"
+#include "time_task.h"
 
 namespace OHOS {
 namespace HiviewDFX {
@@ -150,12 +151,15 @@ int32_t LitePerfPipePair::GetPipeFd(PipeFdUsage usage, FaultLoggerPipeType pipeT
     return -1;
 }
 
-LitePerfPipePair& LitePerfPipePair::CreatePipePair(int uid, uint64_t timeOutTime)
+LitePerfPipePair& LitePerfPipePair::CreatePipePair(int uid, uint64_t delayTime)
 {
     auto pipePair = GetPipePair(uid);
     if (pipePair != nullptr) {
         return *pipePair;
     }
+    auto currentTime = GetMicroSecondsSinceBoot();
+    uint64_t timeOutTime = currentTime + static_cast<uint64_t>(delayTime) * US_PER_S;
+    TaskQueueAdapter::AddDelayTask(LitePerfPipePair::ClearTimeOutPairs, timeOutTime);
     return pipes_.emplace_back(uid, timeOutTime);
 }
 

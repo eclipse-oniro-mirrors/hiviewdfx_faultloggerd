@@ -17,7 +17,7 @@
 #define MINIDUMP_MANAGER_SERVICE_H
 
 #include <unistd.h>
-#include <vector>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>

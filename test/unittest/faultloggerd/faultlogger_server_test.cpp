@@ -345,6 +345,7 @@ HWTEST_F(FaultLoggerdServiceTest, LitePerfPipeFdClientTest01, TestSize.Level2)
 
     requestData.pipeType = FaultLoggerPipeType::PIPE_FD_READ;
     requestData.pid = requestData.head.clientPid;
+    requestData.timeout = 3;
     int32_t readFds[FD_PAIR_NUM] = {-1, -1};
     RequestFileDescriptorFromServer(SERVER_CRASH_SOCKET_NAME, &requestData, sizeof(requestData), readFds, FD_PAIR_NUM);
     SendRequestToServer(SERVER_SOCKET_NAME, &requestData, sizeof(requestData));

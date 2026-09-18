@@ -109,7 +109,8 @@ if (defined(ohos_lite)) {
       "faultloggerd_lite_dump_client_test.cpp",
       "faultloggerd_test.cpp",
       "temp_file_manager_test.cpp",
-      "epoll_manager_test.cpp"
+      "epoll_manager_test.cpp",
+      "time_task_demo_test.cpp"
     ]
     cflags_cc = [ "-Dprivate=public" ]
     defines = [

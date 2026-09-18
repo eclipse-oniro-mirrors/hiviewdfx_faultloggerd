@@ -14,15 +14,17 @@
  */
 #ifndef KERNEL_SNAPSHOT_TASK_H_
 #define KERNEL_SNAPSHOT_TASK_H_
-#include "epoll_manager.h"
+#include "time_task.h"
 
 namespace OHOS {
 namespace HiviewDFX {
 class ReadKernelSnapshotTask : public TimerTask {
 public:
-    ReadKernelSnapshotTask();
-protected:
-    bool OnTimer() override;
+    static bool InitSnapShotTask();
+    explicit ReadKernelSnapshotTask(uint64_t interval);
+    uint64_t Execute() override;
+private:
+    uint64_t interval_;
 };
 } // namespace HiviewDFX
 } // namespace OHOS

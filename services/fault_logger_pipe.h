@@ -74,7 +74,7 @@ public:
     LitePerfPipePair(LitePerfPipePair&&) noexcept = default;
     LitePerfPipePair& operator=(LitePerfPipePair&&) noexcept = default;
 
-    static LitePerfPipePair& CreatePipePair(int uid, uint64_t timeOutTime);
+    static LitePerfPipePair& CreatePipePair(int uid, uint64_t delayTime);
     static bool CheckDumpRecord(int uid);
     static bool CheckDumpMax();
     static LitePerfPipePair* GetPipePair(int uid);
