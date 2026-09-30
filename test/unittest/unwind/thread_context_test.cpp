@@ -16,12 +16,16 @@
 #include <cstdint>
 #include <vector>
 #include <gtest/gtest.h>
+#include <chrono>
+#include <pthread.h>
 #include <securec.h>
 
+#include <csignal>
 #include <cstdio>
 #include <sys/ucontext.h>
 #include <ucontext.h>
 
+#include "dfx_define.h"
 #include "dfx_maps.h"
 #include "thread_context.h"
 
@@ -274,6 +278,119 @@ HWTEST(LocalThreadContextMixTest, AccessMemStackWindow004, testing::ext::TestSiz
     instance.ReleaseCollectThreadContext();
     EXPECT_EQ(instance.AccessMem(sp + 0x10, &val), -1);
 }
+
+namespace {
+constexpr int TEST_FAST_PATH_MS = 500; // predicate version should finish self-tid collect in milliseconds
+constexpr int TEST_TRUE_TIMEOUT_MS_MIN = 900; // true timeout should be close to TIME_OUT (1s)
+constexpr int TEST_TRUE_TIMEOUT_MS_MAX = 3000;
+constexpr int TEST_STACK_RANGE_SIZE = 64 * 1024;
+}
+
+/**
+ * @tc.name: CollectThreadContextLostWakeup001
+ * @tc.desc: Lost wakeup regression (deterministic): signal of self-tid collect is
+ *           delivered at syscall return point, handler completes and notifies before
+ *           wait_for blocks. Old predicate-less implementation always loses the notify
+ *           (sleeps full 1s and returns false); predicate version should return true
+ *           immediately by checking COPY_SUCCESS before blocking.
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, CollectThreadContextLostWakeup001, testing::ext::TestSize.Level0)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+    // set stack range first, otherwise CopyStackBuf in handler is skipped silently
+    // when stackTop_ <= sp_ (no notify)
+    uintptr_t frameAddr = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+    instance.SetStackRang(frameAddr + TEST_STACK_RANGE_SIZE, frameAddr);
+
+    auto begin = std::chrono::steady_clock::now();
+    bool ret = instance.CollectThreadContext(gettid());
+    auto costMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    instance.ReleaseCollectThreadContext();
+
+    ASSERT_TRUE(ret);
+    ASSERT_LT(costMs, TEST_FAST_PATH_MS);
+}
+
+/**
+ * @tc.name: CollectThreadContextTrueTimeout001
+ * @tc.desc: True timeout path: with SIGLOCAL_DUMP blocked the handler cannot run,
+ *           expect false after about 1s. Verifies the predicate fix does not mask
+ *           true timeouts.
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, CollectThreadContextTrueTimeout001, testing::ext::TestSize.Level2)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+
+    sigset_t blockSet;
+    sigemptyset(&blockSet);
+    sigaddset(&blockSet, SIGLOCAL_DUMP);
+    sigset_t oldSet;
+    pthread_sigmask(SIG_BLOCK, &blockSet, &oldSet);
+
+    auto begin = std::chrono::steady_clock::now();
+    bool ret = instance.CollectThreadContext(gettid());
+    auto costMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+
+    pthread_sigmask(SIG_SETMASK, &oldSet, nullptr);
+    struct timespec ts = {0, 0};
+    sigtimedwait(&blockSet, nullptr, &ts); // drain the pending signal left over
+    instance.ReleaseCollectThreadContext();
+
+    ASSERT_FALSE(ret);
+    ASSERT_GE(costMs, TEST_TRUE_TIMEOUT_MS_MIN);
+    ASSERT_LE(costMs, TEST_TRUE_TIMEOUT_MS_MAX);
+}
+
+#if defined(__aarch64__) || defined(__loongarch_lp64) || defined(__x86_64__)
+/**
+ * @tc.name: LocalThreadContextCollectLostWakeup001
+ * @tc.desc: Non-mix path lost wakeup regression (deterministic): same self-tid
+ *           syscall-return-point delivery. Old implementation notifies before waiting
+ *           without predicate, sleeps full 1s and returns nullptr; fixed version
+ *           (tid set before notify + predicate) should return non-null context
+ *           immediately.
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextTest, LocalThreadContextCollectLostWakeup001, testing::ext::TestSize.Level0)
+{
+    auto* instance = &LocalThreadContext::GetInstance();
+    auto begin = std::chrono::steady_clock::now();
+    auto threadContext = instance->CollectThreadContext(gettid());
+    auto costMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+
+    ASSERT_NE(threadContext, nullptr);
+    ASSERT_LT(costMs, TEST_FAST_PATH_MS);
+}
+#endif
+
+/**
+ * @tc.name: CollectThreadContextLostWakeupStress001
+ * @tc.desc: Lost wakeup stress regression: 10 self-tid collects must all succeed
+ *           with total cost far below 10s.
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, CollectThreadContextLostWakeupStress001, testing::ext::TestSize.Level1)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    uintptr_t frameAddr = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+    auto begin = std::chrono::steady_clock::now();
+    for (int i = 0; i < 10; i++) {
+        instance.ReleaseCollectThreadContext();
+        instance.SetStackRang(frameAddr + TEST_STACK_RANGE_SIZE, frameAddr);
+        ASSERT_TRUE(instance.CollectThreadContext(gettid())) << "iter " << i;
+    }
+    auto costMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    instance.ReleaseCollectThreadContext();
+    ASSERT_LT(costMs, 5 * 1000); // old implementation would exceed 10s if every collect lost wakeup
+}
+
 } // namespace HiviewDFX
 } // namepsace OHOS
-

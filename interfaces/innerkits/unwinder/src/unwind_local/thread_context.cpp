@@ -138,8 +138,8 @@ NO_SANITIZE void CopyContextAndWaitTimeout(int sig, siginfo_t *si, void *context
     ctxPtr->firstFrameSp = reinterpret_cast<ucontext_t*>(context)->uc_mcontext.sp;
 #endif
     ctxPtr->frameSz = FpUnwinder::GetPtr()->UnwindSafe(pc, fp, ctxPtr->pcs, DEFAULT_MAX_LOCAL_FRAME_NUM);
-    ctxPtr->cv.notify_all();
     ctxPtr->tid = static_cast<int32_t>(ThreadContextStatus::CONTEXT_UNUSED);
+    ctxPtr->cv.notify_all();
     return;
 }
 #endif
@@ -229,7 +229,9 @@ std::shared_ptr<ThreadContext> LocalThreadContext::CollectThreadContext(int32_t 
     if (!SignalRequestThread(tid, threadContext.get())) {
         return nullptr;
     }
-    if (threadContext->cv.wait_for(lock, TIME_OUT) == std::cv_status::timeout) {
+    if (!threadContext->cv.wait_for(lock, TIME_OUT, [&threadContext] {
+            return threadContext->tid == static_cast<int32_t>(ThreadContextStatus::CONTEXT_UNUSED);
+        })) {
         DFXLOGE("wait_for timeout. tid = %{public}d", tid);
         PrintThreadStatus(tid);
         return nullptr;
@@ -284,7 +286,9 @@ bool LocalThreadContextMix::CollectThreadContext(int32_t tid)
     }
     {
         std::unique_lock<std::mutex> lock(mtx_);
-        if (cv_.wait_for(lock, TIME_OUT) == std::cv_status::timeout) {
+        if (!cv_.wait_for(lock, TIME_OUT, [this, tid] {
+                return tid_ != tid || status_ == SyncStatus::COPY_SUCCESS || status_ == SyncStatus::COPY_FAILED;
+            })) {
             DFXLOGE("wait_for timeout. tid = %{public}d, status = %{public}d", tid, status_);
             PrintThreadStatus(tid);
             return false;
