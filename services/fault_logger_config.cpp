@@ -142,6 +142,7 @@ void InitFaultloggerTestConfig(DirectoryConfig& directoryConfig)
         {
             .type = FaultLoggerType::LEAK_STACKTRACE,
             .fileNamePrefix = "leakstack",
+            .fileExistTime = 3,
             .overTimeFileDeleteType = OverTimeFileDeleteType::ACTIVE,
             .keepFileCount = -1,
             .maxFileCount = 2,

@@ -19,6 +19,7 @@ faultloggerd_test_source = [
   "$faultloggerd_interfaces_path/innerkits/faultloggerd_client/faultloggerd_client.cpp",
   "$faultloggerd_interfaces_path/innerkits/faultloggerd_client/faultloggerd_socket.cpp",
   "$faultloggerd_services_path/epoll_manager.cpp",
+  "$faultloggerd_services_path/time_task.cpp",
   "$faultloggerd_services_path/fault_logger_config.cpp",
   "$faultloggerd_services_path/fault_logger_daemon.cpp",
   "$faultloggerd_services_path/fault_logger_server.cpp",

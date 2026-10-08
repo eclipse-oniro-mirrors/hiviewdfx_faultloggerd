@@ -16,7 +16,7 @@
 #include "coredump_session_manager.h"
 #include "dfx_log.h"
 #include "dfx_util.h"
-#include "epoll_manager.h"
+#include "time_task.h"
 #include "fault_logger_daemon.h"
 
 namespace OHOS {
@@ -38,7 +38,7 @@ void CoredumpTaskScheduler::ScheduleCancelTime(SessionId sessionId, int timeoutM
     auto curTime = GetAbsTimeMilliSeconds();
     int32_t delaySec = endTime > curTime ? static_cast<int32_t>((endTime - curTime) / NUMBER_ONE_THOUSAND) : 0;
     delaySec = std::min(delaySec, timeoutMs / NUMBER_ONE_THOUSAND);
-    auto taskId = DelayTaskQueue::GetInstance().AddDelayTask(removeTask, delaySec);
+    auto taskId = TaskQueueAdapter::AddDelayTask(removeTask, delaySec);
     if (taskId == 0) {
         removeTask();
         return;
@@ -52,7 +52,7 @@ void CoredumpTaskScheduler::CancelTimeout(SessionId sessionId)
     if (!session) {
         return;
     }
-    DelayTaskQueue::GetInstance().RemoveDelayTask(session->delayTaskId);
+    TaskQueueAdapter::RemoveTask(session->delayTaskId);
 }
 }
 }

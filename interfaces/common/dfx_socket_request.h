@@ -96,29 +96,29 @@ typedef enum FaultLoggerType : int32_t {
 */
 typedef enum FaultLoggerClientType : int8_t {
     /** For request a debug file to record nornal unwind and process dump logs */
-    LOG_FILE_DES_CLIENT,
+    LOG_FILE_DES_CLIENT = 0,
     /** For request to dump stack */
-    SDK_DUMP_CLIENT,
+    SDK_DUMP_CLIENT = 1,
     /** For request file descriptor of pipe */
-    PIPE_FD_CLIENT,
+    PIPE_FD_CLIENT = 2,
     /** For report crash dump exception */
-    REPORT_EXCEPTION_CLIENT,
+    REPORT_EXCEPTION_CLIENT = 3,
     /** For report dump stats */
-    DUMP_STATS_CLIENT,
+    DUMP_STATS_CLIENT = 4,
     /** For request to coredump */
-    COREDUMP_CLIENT,
+    COREDUMP_CLIENT = 5,
     /** For request to report coredump status */
-    COREDUMP_PROCESS_DUMP_CLIENT,
+    COREDUMP_PROCESS_DUMP_CLIENT = 6,
     /** For request liteperf file descriptor of pipe */
-    PIPE_FD_LITEPERF_CLIENT,
+    PIPE_FD_LITEPERF_CLIENT = 7,
     /** For request to exec limited processdump */
-    LIMITED_PROCESS_DUMP_CLIENT,
+    LIMITED_PROCESS_DUMP_CLIENT = 8,
     /** For request limited process file descriptor of pipe */
-    PIPE_FD_LIMITED_CLIENT,
+    PIPE_FD_LIMITED_CLIENT = 9,
     /** for set minidump able */
-    MINIDUMP_CLIENT,
+    MINIDUMP_CLIENT = 10,
     /** for request to dump binder processes */
-    BINDER_PIDS_DUMP_CLIENT,
+    BINDER_PIDS_DUMP_CLIENT = 11,
 } FaultLoggerClientType;
 
 typedef struct RequestDataHead {

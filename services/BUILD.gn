@@ -15,6 +15,7 @@ import("//base/hiviewdfx/faultloggerd/faultloggerd.gni")
 
 faultloggerd_sources = [
   "epoll_manager.cpp",
+  "time_task.cpp",
   "fault_logger_config.cpp",
   "fault_logger_daemon.cpp",
   "fault_logger_server.cpp",

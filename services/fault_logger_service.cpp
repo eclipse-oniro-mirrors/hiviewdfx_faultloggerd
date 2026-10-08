@@ -57,6 +57,7 @@
 #include "string_printf.h"
 #include "string_util.h"
 #include "temp_file_manager.h"
+#include "time_task.h"
 
 namespace OHOS {
 namespace HiviewDFX {
@@ -241,7 +242,7 @@ void StatsService::HandleDumpCatcherStats(const FaultLoggerdStatsRequest& reques
         ReportDumpStats(stats);
         RemoveTimeoutDumpStats();
     };
-    DelayTaskQueue::GetInstance().AddDelayTask(std::move(task), delayTime);
+    TaskQueueAdapter::AddDelayTask(std::move(task), delayTime);
 }
 
 int32_t StatsService::OnRequest(const std::string& socketName, int32_t connectionFd,
@@ -515,11 +516,11 @@ int LitePerfPipeService::CheckPerfLimit(int32_t uid, bool checkLimit)
 LitePerfPipeService::PerfResourceLimiter::PerfResourceLimiter()
 {
     constexpr uint32_t resetDuration = 24 * 60 * 60;
-    auto autoResetTask = TimerTaskAdapter::CreateInstance([this] {
-        perfCountsMap_.clear();
-        devicePerfCount = 0;
-    }, resetDuration, resetDuration);
-    EpollManager::GetInstance().AddListener(std::move(autoResetTask));
+    TaskQueueAdapter::AddPeriodicTask([this] {
+            perfCountsMap_.clear();
+            devicePerfCount = 0;
+            return PeriodicTaskResult::KEEP;
+        }, resetDuration, resetDuration);
 }
 
 int LitePerfPipeService::PerfResourceLimiter::CheckPerfLimit(int32_t uid)
@@ -560,18 +561,14 @@ int32_t LitePerfPipeService::OnRequest(const std::string& socketName, int32_t co
         if (responseData != ResponseCode::REQUEST_SUCCESS) {
             return responseData;
         }
-        auto currentTime = GetMicroSecondsSinceBoot();
         constexpr int maxPerfTimeout = (MAX_STOP_SECONDS + DUMP_LITEPERF_TIMEOUT) / MS_PER_S;
         if (requestData.timeout < 0) {
             return ResponseCode::ABNORMAL_SERVICE;
         }
         int32_t delayTime = std::min(requestData.timeout, maxPerfTimeout);
-        constexpr auto usPerS = MS_PER_S * US_PER_MS;
-        uint64_t timeOutTime = currentTime + static_cast<uint64_t>(delayTime) * usPerS;
-        auto& pipePair = LitePerfPipePair::CreatePipePair(uid, timeOutTime);
+        auto& pipePair = LitePerfPipePair::CreatePipePair(uid, delayTime);
         fds[PIPE_BUF_INDEX] = pipePair.GetPipeFd(PipeFdUsage::BUFFER_FD, FaultLoggerPipeType::PIPE_FD_READ);
         fds[PIPE_RES_INDEX] = pipePair.GetPipeFd(PipeFdUsage::RESULT_FD, FaultLoggerPipeType::PIPE_FD_READ);
-        DelayTaskQueue::GetInstance().AddDelayTask(LitePerfPipePair::ClearTimeOutPairs, delayTime);
     } else if (requestData.pipeType == FaultLoggerPipeType::PIPE_FD_WRITE) {
         LitePerfPipePair* pipePair = LitePerfPipePair::GetPipePair(uid);
         if (pipePair == nullptr) {
@@ -644,7 +641,7 @@ int32_t LiteProcDumperPipeService::OnRequest(const std::string& socketName, int3
 {
     DFX_TRACE_SCOPED("LimitedPipeServiceOnRequest");
     if (launchLiteDumpPipeMap_.empty()) {
-        DelayTaskQueue::GetInstance().AddDelayTask([] { launchLiteDumpPipeMap_.clear(); }, ONE_DAY_SEC);
+        TaskQueueAdapter::AddDelayTask([] { launchLiteDumpPipeMap_.clear(); }, ONE_DAY_SEC);
     }
     if (!Filter(socketName, connectionFd, requestData)) {
         return ResponseCode::REQUEST_REJECT;
@@ -678,7 +675,7 @@ int32_t LiteProcDumperPipeService::OnRequest(const std::string& socketName, int3
             requestData.pipeType);
         return ResponseCode::ABNORMAL_SERVICE;
     }
-    DelayTaskQueue::GetInstance().AddDelayTask([pid] {
+    TaskQueueAdapter::AddDelayTask([pid] {
         LimitedPipePair::DelPipePair(pid);
         }, 10); // 10 : dump should finish in 10s
     SendMsgToSocket(connectionFd, &responseData, sizeof(responseData));
@@ -699,7 +696,7 @@ bool LiteProcDumperService::Filter(const std::string& socketName, int32_t connec
     }
     auto uid = GetRealUid(creds.uid);
     if (launchLiteDumpMap_.empty()) {
-        DelayTaskQueue::GetInstance().AddDelayTask([] { launchLiteDumpMap_.clear(); }, ONE_DAY_SEC);
+        TaskQueueAdapter::AddDelayTask([] { launchLiteDumpMap_.clear(); }, ONE_DAY_SEC);
     }
     auto& cnt = launchLiteDumpMap_[uid];
     if (cnt++ >= LITE_DUMP_LIMIT_ONE_DAY) {
@@ -842,7 +839,7 @@ bool MiniDumpService::RestoreDumpable(pid_t pid)
         }
     };
     constexpr int delaySec = 30;
-    DelayTaskQueue::GetInstance().AddDelayTask(task, delaySec);
+    TaskQueueAdapter::AddDelayTask(task, delaySec);
     return true;
 }
 

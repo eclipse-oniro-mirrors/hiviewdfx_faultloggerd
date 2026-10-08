@@ -35,6 +35,7 @@
 #include "dfx_trace.h"
 #include "directory_ex.h"
 #include "file_ex.h"
+#include "time_task.h"
 
 #ifndef HISYSEVENT_DISABLE
 #include "hisysevent.h"
@@ -292,7 +293,7 @@ void TempFileManager::RestartDeleteTaskOnStart(int32_t existTimeInSecond, std::l
         int32_t existTimeLeft = existTimeInSecond > existDuration ? existTimeInSecond - existDuration : 0;
         int32_t fileClearTime = existTimeLeft > static_cast<int32_t>(fileClearTimeInSecond) ?
             existTimeLeft : static_cast<int32_t>(fileClearTimeInSecond);
-        DelayTaskQueue::GetInstance().AddDelayTask(
+        TaskQueueAdapter::AddDelayTask(
             [file] {
                 RemoveTempFile(file);
             }, static_cast<uint32_t>(fileClearTime));
@@ -574,7 +575,7 @@ void TempFileManager::TempFileWatcher::HandleFileCreate(const std::string& fileP
             filePath.c_str(), currentFileCount, fileConfig.keepFileCount,
             fileConfig.maxFileCount, fileConfig.fileExistTime, fileConfig.overTimeFileDeleteType);
     if (fileConfig.overTimeFileDeleteType == OverTimeFileDeleteType::ACTIVE) {
-        DelayTaskQueue::GetInstance().AddDelayTask(
+        TaskQueueAdapter::AddDelayTask(
             [filePath] {
                 RemoveTempFile(filePath);
             }, fileConfig.fileExistTime);
@@ -588,11 +589,11 @@ void TempFileManager::TempFileWatcher::HandleFileCreate(const std::string& fileP
     }
 
     if (fileConfig.maxSingleFileSize > 0) {
-        auto taskId = PeriodicTaskQueue::GetInstance().AddPeriodicTask(
+        auto taskId = TaskQueueAdapter::AddPeriodicTask(
             [filePath, maxSingleFileSize = fileConfig.maxSingleFileSize,
-             overFileSizeAction = fileConfig.overFileSizeAction]() -> bool {
+             overFileSizeAction = fileConfig.overFileSizeAction]() -> PeriodicTaskResult {
                 if (access(filePath.c_str(), F_OK) != 0) {
-                    return false;
+                    return PeriodicTaskResult::REMOVE;
                 }
                 uint64_t fileSize = GetFileSize(filePath);
                 if (fileSize > maxSingleFileSize) {
@@ -603,8 +604,8 @@ void TempFileManager::TempFileWatcher::HandleFileCreate(const std::string& fileP
                     config.overFileSizeAction = overFileSizeAction;
                     CheckTempFileSize(config, filePath);
                 }
-                return true;
-            }, FILE_SIZE_MONITOR_INTERVAL);
+                return PeriodicTaskResult::KEEP;
+            }, FILE_SIZE_MONITOR_INTERVAL, FILE_SIZE_MONITOR_INTERVAL);
         if (taskId > 0) {
             fileSizeMonitorTasks_[filePath] = taskId;
         }
@@ -621,7 +622,7 @@ void TempFileManager::TempFileWatcher::HandleFileDeleteOrMove(const std::string&
     DFXLOGD("file %{public}s is deleted or moved, currentFileCount: %{public}d", filePath.c_str(), currentFileCount);
     auto it = fileSizeMonitorTasks_.find(filePath);
     if (it != fileSizeMonitorTasks_.end()) {
-        PeriodicTaskQueue::GetInstance().RemovePeriodicTask(it->second);
+        TaskQueueAdapter::RemoveTask(it->second);
         fileSizeMonitorTasks_.erase(it);
     }
 }
@@ -633,7 +634,7 @@ void TempFileManager::TempFileWatcher::HandleFileWrite(const std::string& filePa
     }
     auto it = fileSizeMonitorTasks_.find(filePath);
     if (it != fileSizeMonitorTasks_.end()) {
-        PeriodicTaskQueue::GetInstance().RemovePeriodicTask(it->second);
+        TaskQueueAdapter::RemoveTask(it->second);
         fileSizeMonitorTasks_.erase(it);
     }
 }

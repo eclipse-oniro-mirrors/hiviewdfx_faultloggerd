@@ -16,16 +16,19 @@
 #ifndef EPOLL_MANAGER_H_
 #define EPOLL_MANAGER_H_
 
-#include <functional>
 #include <list>
 #include <memory>
-#include <mutex>
-#include <tuple>
 
 #include "smart_fd.h"
 
 namespace OHOS {
 namespace HiviewDFX {
+
+constexpr uint64_t MS_PER_S = 1000;
+constexpr uint64_t US_PER_MS = 1000;
+constexpr uint64_t NS_PER_US = 1000;
+constexpr uint64_t US_PER_S = MS_PER_S * US_PER_MS;
+constexpr uint64_t NS_PER_S = NS_PER_US * US_PER_S;
 
 enum class EventResult {
     KEEP,    // Keep the listener after event handling
@@ -89,82 +92,7 @@ private:
     std::list<std::unique_ptr<EpollListener>> listeners_;
     SmartFd eventFd_;
 };
-
-constexpr uint64_t MS_PER_S = 1000;
-constexpr uint64_t US_PER_MS = 1000;
-constexpr uint64_t NS_PER_US = 1000;
-
 uint64_t GetMicroSecondsSinceBoot();
-
-class TimerTask : public EpollListener {
-public:
-    TimerTask();
-    ~TimerTask() override = default;
-    EventResult OnEventPoll() final;
-protected:
-    virtual bool OnTimer() = 0;  // Returns true to keep timer, false to remove
-    bool SetTimeOption(int32_t delayTimeInS, int32_t intervalTimeInS);
-};
-
-class TimerTaskAdapter : public TimerTask {
-public:
-    static std::unique_ptr<TimerTask> CreateInstance(std::function<void()> workFunc,
-        int32_t delayTimeInS, int32_t intervalTimeInS = 0);
-    TimerTaskAdapter(const TimerTaskAdapter&) = delete;
-    TimerTaskAdapter& operator=(const TimerTaskAdapter&) = delete;
-    ~TimerTaskAdapter() override = default;
-    bool OnTimer() override;
-private:
-    TimerTaskAdapter(std::function<void()>& workFunc, bool isIntervalTask);
-    std::function<void()> work_;
-    bool isIntervalTask_ = false;
-};
-
-class DelayTaskQueue {
-public:
-    static DelayTaskQueue& GetInstance();
-    DelayTaskQueue& operator=(const DelayTaskQueue&) = delete;
-    DelayTaskQueue(const DelayTaskQueue&) = delete;
-    DelayTaskQueue(DelayTaskQueue&&) = delete;
-    DelayTaskQueue& operator=(DelayTaskQueue&&) = delete;
-    uint64_t AddDelayTask(std::function<void()> workFunc, uint32_t delayTimeInS);
-    bool RemoveDelayTask(uint64_t delayTaskId);
-private:
-    class Executor final : public TimerTask {
-    public:
-        explicit Executor(DelayTaskQueue& queue) : delayTaskQueue_(queue) {};
-        ~Executor() override;
-    protected:
-        bool OnTimer() final;
-        DelayTaskQueue& delayTaskQueue_;
-    };
-    DelayTaskQueue() = default;
-    ~DelayTaskQueue();
-    bool InitExecutor(uint32_t delayTimeInS);
-    /**
-     * Used to check if there is already an executor and retrieve the fd bound to this executor.
-     */
-    const Executor* executor_{};
-    std::list<std::pair<uint64_t, std::function<void()>>> delayTasks_;
-};
-
-class PeriodicTaskQueue {
-public:
-    static PeriodicTaskQueue& GetInstance();
-    PeriodicTaskQueue& operator=(const PeriodicTaskQueue&) = delete;
-    PeriodicTaskQueue(const PeriodicTaskQueue&) = delete;
-    PeriodicTaskQueue(PeriodicTaskQueue&&) = delete;
-    PeriodicTaskQueue& operator=(PeriodicTaskQueue&&) = delete;
-    uint64_t AddPeriodicTask(std::function<bool()> workFunc, uint32_t intervalTimeInS);
-    bool RemovePeriodicTask(uint64_t taskId);
-private:
-    PeriodicTaskQueue() = default;
-    ~PeriodicTaskQueue();
-    void Execute();
-    void ScheduleNextTask(uint64_t currentTime);
-    std::list<std::tuple<uint64_t, uint64_t, uint32_t, std::function<bool()>>> periodicTasks_;
-    uint64_t currentDelayTaskId_{0};
-};
 }
 }
 

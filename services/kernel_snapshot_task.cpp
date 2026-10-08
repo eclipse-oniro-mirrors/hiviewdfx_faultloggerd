@@ -57,44 +57,49 @@ std::string ReadKernelSnapshot()
 }
 }
 
-ReadKernelSnapshotTask::ReadKernelSnapshotTask()
+bool ReadKernelSnapshotTask::InitSnapShotTask()
 {
-    constexpr int minInterval = 3;
+    constexpr int minIntervalInSecond = 3;
     constexpr auto kernelSnapshotInterval = "kernel_snapshot_check_interval";
     // Read snapshot interval log version is 1 minute, nolog version is 5 minutes.
-    int defaultInterval = OHOS::HiviewDFX::IsDfrBetaVersion() ? 60 : 300;
-    int interval = std::max(system::GetIntParameter(kernelSnapshotInterval, defaultInterval), minInterval);
+    int32_t defaultIntervalInSecond = (OHOS::HiviewDFX::IsDfrBetaVersion() ? 60 : 300);
+    int32_t configIntervalInSecond = system::GetIntParameter(kernelSnapshotInterval, defaultIntervalInSecond);
+    int32_t intervalInSecond = std::max(configIntervalInSecond, minIntervalInSecond);
+    auto interval = static_cast<uint64_t>(intervalInSecond) * US_PER_MS * MS_PER_S;
 #ifdef FAULTLOGGERD_TEST
-    SetTimeOption(minInterval, interval);
+    auto testDelayTime = static_cast<uint64_t>(minIntervalInSecond) * US_PER_MS * MS_PER_S;
+    return TimerTaskQueue::GetInstance().AddTask(std::make_unique<ReadKernelSnapshotTask>(interval), testDelayTime) > 0;
 #else
-    SetTimeOption(interval, interval);
+    return TimerTaskQueue::GetInstance().AddTask(std::make_unique<ReadKernelSnapshotTask>(interval), interval) > 0;
 #endif
 }
 
-bool ReadKernelSnapshotTask::OnTimer()
+ReadKernelSnapshotTask::ReadKernelSnapshotTask(uint64_t interval) : interval_(interval) {}
+
+uint64_t ReadKernelSnapshotTask::Execute()
 {
     const std::string snapshotCont = ReadKernelSnapshot();
     if (snapshotCont.empty()) {
         DFXLOGD("the snapshot file does not exist or is empty.");
-        return true;
+        return interval_;
     }
     DFXLOGI("read snapshot begin with %{public}s", snapshotCont.substr(0, 25).c_str()); // 25 : only need 25
     constexpr auto kernelSnapshotLibraryName = "libkernel_snapshot.z.so";
     void* handle = dlopen(kernelSnapshotLibraryName, RTLD_LAZY);
     if (handle == nullptr) {
         DFXLOGE("failed dlopen library %{public}s for error %{public}d", kernelSnapshotLibraryName, errno);
-        return true;
+        return interval_;
     }
     constexpr auto methodName = "ProcessKernelSnapShot";
     auto processKernelSnapShot = reinterpret_cast<void (*)(const std::string&)>(dlsym(handle, methodName));
     if (processKernelSnapShot == nullptr) {
         DFXLOGE("can't find method %{public}s in %{public}s, just exit", methodName, kernelSnapshotLibraryName);
         dlclose(handle);
-        return true;
+        return interval_;
     }
     processKernelSnapShot(snapshotCont);
     dlclose(handle);
-    return true;
+    return interval_;
 }
 }
 }

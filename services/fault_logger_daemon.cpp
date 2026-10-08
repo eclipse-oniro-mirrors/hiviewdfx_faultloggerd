@@ -64,7 +64,9 @@ bool FaultLoggerDaemon::InitHelperServer()
     }
 #ifndef is_ohos_lite
     MinidumpManagerService::GetInstance().Init();
-    EpollManager::GetInstance().AddListener(std::make_unique<ReadKernelSnapshotTask>());
+    if (!ReadKernelSnapshotTask::InitSnapShotTask()) {
+        DFXLOGE("%{public}s :: Failed to init kernel snapshot task", FAULTLOGGERD_DAEMON_TAG);
+    }
 #endif
     return true;
 }
