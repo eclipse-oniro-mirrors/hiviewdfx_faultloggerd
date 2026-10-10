@@ -188,7 +188,7 @@ private:
         EventResult OnEventPoll() override;
         void OnTimeOut() override;
     private:
-        static constexpr uint32_t tempFileWaitOutOfTime = 10000;
+        static constexpr uint32_t tempFileWaitOutOfTime = 15000;
         TempFileListener(SmartFd fd, const std::string& watchPath, const pid_t pid,
             std::set<pid_t> nsPids);
         void HandlerTempFile(const std::string& filePath);
