@@ -192,6 +192,7 @@ std::map<int, std::string> illCode = {
     { ILL_COPROC, string("ILL_COPROC") },
     { ILL_BADSTK, string("ILL_BADSTK") },
     { ILL_ILLPACCFI, string("ILL_ILLPACCFI") },
+    { ILL_ILLBTICFI, string("ILL_ILLBTICFI") },
     { SI_USER, string("SI_USER") },
 };
 std::map<int, std::string> fpeCode = {
