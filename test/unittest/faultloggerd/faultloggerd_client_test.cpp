@@ -37,6 +37,7 @@
 #include "smart_fd.h"
 #include "minidump_manager_service.h"
 #include "dfx_socket_request.h"
+#include "fault_logger_service.h"
 
 constexpr int32_t ENABLE_FLAG = 1;
 constexpr int32_t DISABLE_FLAG = 0;
@@ -760,6 +761,49 @@ HWTEST_F(FaultloggerdClientTest, TempFileManagerCreateFileDescriptorFilePathTest
     ASSERT_GE(fd.GetFd(), 0);
     EXPECT_FALSE(filePath.empty());
     EXPECT_TRUE(filePath.find("cppcrash") != std::string::npos);
+}
+
+/**
+ * @tc.name: RequestProcStatusInfoTest001
+ * @tc.desc: test RequestProcStatusInfo end-to-end with current process.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestProcStatusInfoTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestProcStatusInfoTest001: start.";
+    ProcStatusInfo info{};
+    int32_t ret = RequestProcStatusInfo(getpid(), &info);
+    ASSERT_EQ(ret, ResponseCode::REQUEST_SUCCESS);
+    EXPECT_GT(strlen(info.name), 0);
+    GTEST_LOG_(INFO) << "RequestProcStatusInfoTest001: end.";
+}
+
+/**
+ * @tc.name: RequestProcStatusInfoTest002
+ * @tc.desc: test RequestProcStatusInfo with invalid parameters.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestProcStatusInfoTest002, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestProcStatusInfoTest002: start.";
+    ProcStatusInfo info{};
+    EXPECT_EQ(RequestProcStatusInfo(-1, &info), ResponseCode::DEFAULT_ERROR_CODE);
+    EXPECT_EQ(RequestProcStatusInfo(getpid(), nullptr), ResponseCode::DEFAULT_ERROR_CODE);
+    GTEST_LOG_(INFO) << "RequestProcStatusInfoTest002: end.";
+}
+
+/**
+ * @tc.name: RequestProcStatusInfoTest003
+ * @tc.desc: test RequestProcStatusInfo with non-existent pid.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestProcStatusInfoTest003, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestProcStatusInfoTest003: start.";
+    ProcStatusInfo info{};
+    int32_t ret = RequestProcStatusInfo(NONEXISTENT_TEST_PID, &info);
+    EXPECT_NE(ret, ResponseCode::REQUEST_SUCCESS);
+    GTEST_LOG_(INFO) << "RequestProcStatusInfoTest003: end.";
 }
 } // namespace HiviewDFX
 } // namespace OHOS

@@ -124,6 +124,24 @@ int32_t FinishCoredumpCb(int32_t targetPid, std::string& fileName, int32_t ret);
 int32_t RequestBinderPidsDump(int32_t pid, const int32_t* binderPids,
     const int32_t* nsBinderPids, uint32_t count, int* fd);
 
+/**
+ * @brief process status info, including namespace pid and process name
+ */
+typedef struct ProcStatusInfo {
+    /** namespace pid of the queried process, -1 on failure */
+    int32_t nsPid;
+    /** process name of the queried process */
+    char name[MAX_PROC_STATUS_NAME_LEN];
+} ProcStatusInfo;
+
+/**
+ * @brief request faultloggerd to query the process status info (name & namespace pid)
+ * @param pid process id to query
+ * @param info output parameter to receive the process status info
+ * @return if succeed return 0, otherwise return the error code
+ */
+int32_t RequestProcStatusInfo(int32_t pid, ProcStatusInfo* info);
+
 #ifdef __cplusplus
 }
 #endif

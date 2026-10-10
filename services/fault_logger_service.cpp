@@ -850,21 +850,20 @@ int32_t BinderPidsDumpService::OnRequest(const std::string& socketName, int32_t 
         return ResponseCode::REQUEST_REJECT;
     }
     auto nsPids = SendSignalToBinderPid(requestData);
-    if (nsPids.empty()) {
-        DFXLOGW("%{public}s :: all signals sent failed", FAULTLOGGERD_SERVICE_TAG);
-        return ResponseCode::INVALID_REQUEST_DATA;
+    // Create temp file listener if signals were sent to binder processes successfully.
+    if (!nsPids.empty()) {
+        constexpr auto extraTempFilePathParam = "persist.hiviewdfx.faultloggerd.extraTempFilePath";
+        auto extraTempFilePath = OHOS::system::GetParameter(extraTempFilePathParam, "");
+        if (extraTempFilePath.empty()) {
+            return ResponseCode::UN_SUPPORTED_FEATURE;
+        }
+        auto listener = TempFileListener::CreateInstance(extraTempFilePath, requestData.pid, std::move(nsPids));
+        if (listener == nullptr) {
+            DFXLOGE("%{public}s :: failed to create temp file listener", FAULTLOGGERD_SERVICE_TAG);
+            return ResponseCode::ABNORMAL_SERVICE;
+        }
+        EpollManager::GetInstance().AddListener(std::move(listener));
     }
-    constexpr auto extraTempFilePathParam = "persist.hiviewdfx.faultloggerd.extraTempFilePath";
-    auto extraTempFilePath = OHOS::system::GetParameter(extraTempFilePathParam, "");
-    if (extraTempFilePath.empty()) {
-        return ResponseCode::UN_SUPPORTED_FEATURE;
-    }
-    auto listener = TempFileListener::CreateInstance(extraTempFilePath, requestData.pid, std::move(nsPids));
-    if (!listener) {
-        DFXLOGE("%{public}s :: failed to create temp file listener", FAULTLOGGERD_SERVICE_TAG);
-        return ResponseCode::ABNORMAL_SERVICE;
-    }
-    EpollManager::GetInstance().AddListener(std::move(listener));
     std::string timeStr = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
     std::string binderInfoPath = FaultLoggerConfig::GetInstance().GetTempFileConfig().tempFilePath +
         "/peer_binder_stack-" + std::to_string(requestData.pid) + "-" + timeStr;
@@ -884,17 +883,14 @@ int32_t BinderPidsDumpService::OnRequest(const std::string& socketName, int32_t 
 
 std::set<pid_t> BinderPidsDumpService::SendSignalToBinderPid(const BinderPidsDumpRequestData& requestData)
 {
-    siginfo_t si{0};
-    constexpr auto sigDump = 3;
-    si.si_signo = sigDump;
-    si.si_code = SI_USER;
     std::set<pid_t> nsPids;
     for (size_t i = 0; i < MAX_BINDER_PIDS_COUNT; i++) {
         if (requestData.binderPids[i] <= 0 || requestData.nsBinderPids[i] <= 0) {
             continue;
         }
-        int32_t res = FaultCommonUtil::SendSignalToProcess(requestData.binderPids[i], si);
-        if (res != ResponseCode::REQUEST_SUCCESS) {
+        errno = 0;
+        constexpr auto sigDump = 3;
+        if (kill(requestData.binderPids[i], sigDump) != 0) {
             DFXLOGE("%{public}s :: send signal to pid %{public}d failed", FAULTLOGGERD_SERVICE_TAG,
                 requestData.binderPids[i]);
             continue;
@@ -912,7 +908,7 @@ std::unique_ptr<BinderPidsDumpService::TempFileListener> BinderPidsDumpService::
         DFXLOGE("%{public}s :: failed to init inotify fd.", FAULTLOGGERD_SERVICE_TAG);
         return nullptr;
     }
-    if (inotify_add_watch(watchFd.GetFd(), watchPath.c_str(), IN_CLOSE) < 0) {
+    if (inotify_add_watch(watchFd.GetFd(), watchPath.c_str(), IN_CREATE) < 0) {
         DFXLOGE("%{public}s :: failed to add watch for path: %{public}s", FAULTLOGGERD_SERVICE_TAG, watchPath.c_str());
         return nullptr;
     }
@@ -1013,6 +1009,35 @@ void BinderPidsDumpService::TempFileListener::OnTimeOut()
     }
     DFXLOGW("%{public}s :: inotify wait timeout for path: %{public}s, remaining nsPids: [%{public}s]",
         FAULTLOGGERD_SERVICE_TAG, watchPath_.c_str(), pidsStr.c_str());
+}
+
+int32_t ProcStatusInfoService::OnRequest(const std::string& socketName, int32_t connectionFd,
+    const ProcStatusInfoRequestData& requestData)
+{
+    if (socketName != SERVER_CRASH_SOCKET_NAME) {
+        return ResponseCode::REQUEST_REJECT;
+    }
+    if (requestData.pid < 0) {
+        DFXLOGE("%{public}s :: invalid pid: %{public}d.", FAULTLOGGERD_SERVICE_TAG, requestData.pid);
+        return ResponseCode::INVALID_REQUEST_DATA;
+    }
+    ProcStatusInfoResult result{};
+    ProcInfo procInfo;
+    if (!GetProcStatusByPid(requestData.pid, procInfo)) {
+        return ResponseCode::INVALID_REQUEST_DATA;
+    }
+    result.nsPid = procInfo.ns ? procInfo.nsPid : -1;
+    std::string procName;
+    ReadProcessName(requestData.pid, procName);
+    if (memcpy_s(result.name, MAX_PROC_STATUS_NAME_LEN, procName.c_str(), procName.size()) != EOK) {
+        return ResponseCode::ABNORMAL_SERVICE;
+    }
+    int retCode = REQUEST_SUCCESS;
+    if (!SendMsgToSocket(connectionFd, &retCode, sizeof(retCode)) ||
+        !SendMsgToSocket(connectionFd, &result, sizeof(result))) {
+        DFXLOGE("%{public}s :: failed to send proc status info result.", FAULTLOGGERD_SERVICE_TAG);
+    }
+    return retCode;
 }
 #endif
 }

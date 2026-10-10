@@ -15,6 +15,7 @@
 #ifndef DFX_SIGNAL_HANDLER_H
 #define DFX_SIGNAL_HANDLER_H
 
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stddef.h>
 
@@ -124,6 +125,13 @@ enum CrashLogConfigType : uint8_t {
  * @warning Non-thread-safe and non-signal-safe. Call early in program initialization.
  */
 int DFX_SetCrashLogConfig(uint8_t type, uint32_t value);
+
+/**
+ * @brief Set binder caller pid for the current thread.
+ *
+ * @param callerPid binder calling pid.
+ */
+void DFX_SetBinderCallerPid(pid_t callerPid);
 
 /**
  * @brief notify watchdog thread start

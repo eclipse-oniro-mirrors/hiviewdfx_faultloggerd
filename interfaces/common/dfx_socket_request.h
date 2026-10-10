@@ -119,6 +119,8 @@ typedef enum FaultLoggerClientType : int8_t {
     MINIDUMP_CLIENT = 10,
     /** for request to dump binder processes */
     BINDER_PIDS_DUMP_CLIENT = 11,
+    /** for request to query process status info (name & namespace pid) */
+    PROC_STATUS_QUERY_CLIENT = 12,
 } FaultLoggerClientType;
 
 typedef struct RequestDataHead {
@@ -276,6 +278,22 @@ typedef struct BinderPidsDumpRequestData {
     /** namespace process ids */
     int32_t nsBinderPids[MAX_BINDER_PIDS_COUNT];
 } __attribute__((packed)) BinderPidsDumpRequestData;
+
+#define MAX_PROC_STATUS_NAME_LEN 128
+
+typedef struct ProcStatusInfoRequestData {
+    /** request data head **/
+    RequestDataHead head;
+    /** process id to query */
+    int32_t pid;
+} __attribute__((packed)) ProcStatusInfoRequestData;
+
+typedef struct ProcStatusInfoResult {
+    /** namespace pid of the queried process, -1 on failure */
+    int32_t nsPid;
+    /** process name of the queried process */
+    char name[MAX_PROC_STATUS_NAME_LEN];
+} __attribute__((packed)) ProcStatusInfoResult;
 
 /**
  * @brief  request information

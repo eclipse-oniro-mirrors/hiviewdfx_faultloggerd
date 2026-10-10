@@ -199,6 +199,12 @@ private:
         std::set<pid_t> nsPids_;
     };
 };
+
+class ProcStatusInfoService : public FaultLoggerService<ProcStatusInfoRequestData> {
+public:
+    int32_t OnRequest(const std::string& socketName, int32_t connectionFd,
+                      const ProcStatusInfoRequestData& requestData) override;
+};
 #endif
 }
 }
