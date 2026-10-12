@@ -43,7 +43,7 @@ typedef struct HstackVal {
     char hstackLogBuff[BUFF_STACK_SIZE] {0};
 } HstackVal;
 }
-int32_t DfxGetKernelStack(int32_t pid, std::string& kernelStack, bool needArkts)
+int32_t DfxGetKernelStack(int32_t pid, std::string& kernelStack, bool needArkts, bool threadState)
 {
     auto kstackBuf = std::make_shared<HstackVal>();
     if (kstackBuf == nullptr) {
@@ -66,6 +66,12 @@ int32_t DfxGetKernelStack(int32_t pid, std::string& kernelStack, bool needArkts)
     } else {
         size_t len = strnlen(kstackBuf->hstackLogBuff, BUFF_STACK_SIZE);
         kernelStack = std::string(kstackBuf->hstackLogBuff, len);
+    }
+    if (threadState) {
+        ProcessInfo info;
+        if (ParseProcInfo(pid, info)) {
+            kernelStack += FomatProcessInfoToString(info) + "\n";
+        }
     }
     return res;
 }
