@@ -155,6 +155,8 @@ std::string DfxSignal::FormatSIGILLCodeName(const int32_t signalCode)
             return "ILL_BADSTK";
         case ILL_ILLPACCFI:
             return "ILL_ILLPACCFI";
+        case ILL_ILLBTICFI:
+            return "ILL_ILLBTICFI";
         default:
             return FormatCommonSignalCodeName(signalCode);
     }
