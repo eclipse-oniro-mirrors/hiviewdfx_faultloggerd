@@ -32,6 +32,7 @@
 #include "dfx_log.h"
 #include "dfx_util.h"
 #include "elapsed_time.h"
+#include "smart_fd.h"
 #include <sys/wait.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -183,67 +184,45 @@ static int WaitProcessExitTimeout(pid_t pid, int timeoutMs)
     return -1;
 }
 
-static void CleanFd(int *pipeFd)
-{
-    if (*pipeFd != -1) {
-        syscall(SYS_close, *pipeFd);
-        *pipeFd = -1;
-    }
-}
-
-static void CleanPipe(int *pipeFd)
-{
-    CleanFd(&pipeFd[0]);
-    CleanFd(&pipeFd[1]);
-}
-
-static bool InitPipe(int *pipeFd)
-{
-    if (syscall(SYS_pipe2, pipeFd, 0) == -1) {
-        CleanPipe(pipeFd);
-        return false;
-    }
-    return true;
-}
-
 using ChildFuncType = std::function<std::string(void)>;
 
 static std::pair<bool, std::string> ExecuteTaskByFork(ChildFuncType func)
 {
     auto result = std::make_pair(false, std::string(""));
     int pipefd[2] = {-1, -1};
-    if (!InitPipe(pipefd)) {
+    if (syscall(SYS_pipe2, pipefd, 0) == -1) {
         DFXLOGE("Create pipe failed. errno:%{public}d", errno);
         return result;
     }
+    SmartFd readFd(pipefd[0]);
+    SmartFd writeFd(pipefd[1]);
 
     pid_t pid = fork();
     if (pid < 0) {
         DFXLOGE("Fork failed. errno:%{public}d", errno);
-        CleanPipe(pipefd);
         return result;
     } else if (pid == 0) {
         alarm(ALARM_TIME_S);
         DFXLOGI("start in child process.");
         prctl(PR_SET_NAME, "processdump_parser");
-        CleanFd(&pipefd[0]);
+        readFd.Reset();
         std::string result = func();
-        ssize_t nwrite = OHOS_TEMP_FAILURE_RETRY(write(pipefd[1], result.c_str(), result.size()));
+        ssize_t nwrite = OHOS_TEMP_FAILURE_RETRY(write(writeFd.GetFd(), result.c_str(), result.size()));
         if (nwrite != static_cast<ssize_t>(result.size())) {
             DFXLOGE("write offline data fail, err:%{public}d", errno);
         }
-        CleanFd(&pipefd[1]);
+        writeFd.Reset();
         _exit(0);
     }
-    CleanFd(&pipefd[1]);
+    writeFd.Reset();
     std::string formattedStack = "";
     char temp[1024] = {0};
     ssize_t bytesRead;
-    while ((bytesRead = OHOS_TEMP_FAILURE_RETRY(read(pipefd[0], temp, sizeof(temp) - 1))) > 0) {
+    while ((bytesRead = OHOS_TEMP_FAILURE_RETRY(read(readFd.GetFd(), temp, sizeof(temp) - 1))) > 0) {
         temp[bytesRead] = '\0';
         formattedStack += std::string(temp, bytesRead);
     }
-    CleanFd(&pipefd[0]);
+    readFd.Reset();
     int res = WaitProcessExitTimeout(pid, WAITPID_TIMEOUT_MS);
     if (res != 0 || formattedStack.empty()) {
         return result;
