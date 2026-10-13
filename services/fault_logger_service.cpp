@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cstdlib>
 #include <fstream>
@@ -812,6 +813,19 @@ bool MiniDumpService::SendMinidumpSignal(pid_t pid)
     return true;
 }
 
+static void ReportMinidumpInvokeEvent(MAYBE_UNUSED const std::string& cmdLine)
+{
+#ifndef HISYSEVENT_DISABLE
+    std::string summary = "minidump invoke:" + cmdLine;
+    auto now = std::chrono::system_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::RELIABILITY, "CPP_CRASH_NO_LOG",
+        OHOS::HiviewDFX::HiSysEvent::EventType::FAULT,
+        "HAPPEN_TIME", timestamp,
+        "SUMMARY", summary);
+#endif
+}
+
 bool MiniDumpService::RestoreDumpable(pid_t pid)
 {
     if (pid <= 0) {
@@ -822,6 +836,7 @@ bool MiniDumpService::RestoreDumpable(pid_t pid)
     if (cmdLine.empty()) {
         return false;
     }
+    ReportMinidumpInvokeEvent(cmdLine);
     ProcessInfo info;
     std::string statPath = "/proc/" + std::to_string(pid) + "/stat";
     if (!ParseStat(statPath, info)) {
