@@ -34,7 +34,7 @@ enum KernelStackErrorCode : int32_t {
     KERNELSTACK_EOPEN,
     KERNELSTACK_EIOCTL,
 };
-int32_t DfxGetKernelStack(int32_t pid, std::string& kernelStack, bool needArkts = false);
+int32_t DfxGetKernelStack(int32_t pid, std::string& kernelStack, bool needArkts = false, bool threadState = false);
 bool FormatThreadKernelStack(const std::string& kernelStack, DfxThreadStack& threadStack,
     DfxOfflineParser *parser = nullptr);
 bool FormatProcessKernelStack(const std::string& kernelStack, std::vector<DfxThreadStack>& processStack);
