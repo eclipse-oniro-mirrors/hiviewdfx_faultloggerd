@@ -22,6 +22,7 @@ group("fuzzServerTest") {
         "filedescservice_fuzzer:FileDescServiceFuzzTest",
         "filemanager_fuzzer:FileManagerFuzzTest",
         "litedump_fuzzer:LitedumpFuzzTest",
+        "liteperfpipeservice_fuzzer:LitePerfPipeServiceFuzzTest",
         "pipeservice_fuzzer:PipeServiceFuzzTest",
         "sdkdumpservice_fuzzer:SdkDumpServiceFuzzTest",
     ]
