@@ -21,7 +21,6 @@
 #include <sys/ptrace.h>
 #include <sys/uio.h>
 #include "dfx_define.h"
-#include "dfx_guest_state.h"
 #include "dfx_log.h"
 #include "string_printf.h"
 
@@ -85,44 +84,11 @@ std::shared_ptr<DfxRegs> DfxRegs::CreateFromRegs(const UnwindMode mode, const ui
     return dfxregs;
 }
 
-ArchType DfxRegs::Arch() const
-{
-#if defined(__arm__)
-    return ARCH_ARM;
-#elif defined(__aarch64__)
-    return ARCH_ARM64;
-#elif defined(__x86_64__)
-    return ARCH_X86_64;
-#elif defined(__i386__)
-    return ARCH_X86;
-#elif defined(__riscv) && defined(__riscv64)
-    return ARCH_RISCV64;
-#else
-    return ARCH_UNKNOWN;
-#endif
-}
-
 std::shared_ptr<DfxRegs> DfxRegs::CreateRemoteRegs(pid_t pid)
 {
     if (pid <= 0) {
         return nullptr;
     }
-#if defined(__aarch64__)
-    // Translated (arm32-on-arm64) thread: unwind its guest context instead of
-    // the translated host code. The pre-check keeps native threads on the fast
-    // path, and a failed guest read falls back to the host registers below.
-    if (DfxGuestState::IsTranslatedThread(pid)) {
-        GuestArm32Regs guestRegs;
-        if (DfxGuestState::ReadGuestArm32Regs(pid, guestRegs)) {
-            auto guest = std::make_shared<DfxRegsGuestArm32>();
-            guest->SetGuestRegs(guestRegs.r);
-            DFXLOGI("CreateRemoteRegs: use arm32 guest regs, tid=%{public}d", static_cast<int>(pid));
-            return guest;
-        }
-        DFXLOGW("CreateRemoteRegs: translated thread but guest regs unreadable, tid=%{public}d",
-            static_cast<int>(pid));
-    }
-#endif
     auto dfxregs = DfxRegs::Create();
     gregset_t regs;
     struct iovec iov;

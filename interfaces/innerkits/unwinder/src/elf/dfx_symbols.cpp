@@ -134,23 +134,17 @@ bool DfxSymbols::AddSymbolsByPlt(std::vector<DfxSymbol>& symbols, std::shared_pt
 bool DfxSymbols::GetFuncNameAndOffsetByPc(uint64_t relPc, std::shared_ptr<DfxElf> elf,
     std::string& funcName, uint64_t& funcOffset)
 {
-    // Thumb functions keep bit0 set in the arm32 symbol table; mark lookup
-    // pcs accordingly for native arm32 targets and arm32 guest ELFs.
-    bool isArm32 = elf != nullptr && elf->IsArm32Elf();
 #if defined(__arm__)
-    isArm32 = elf == nullptr ? true : isArm32;
+    relPc = relPc | 1;
 #endif
-    if (isArm32) {
-        relPc = relPc | 1;
-    }
     ElfSymbol elfSymbol;
     if ((elf != nullptr) && elf->GetFuncInfo(relPc, elfSymbol)) {
         DFXLOGU("nameStr: %{public}s", elfSymbol.nameStr.c_str());
         funcName = Demangle(elfSymbol.nameStr);
         funcOffset = relPc - elfSymbol.value;
-        if (isArm32) {
-            funcOffset &= ~1;
-        }
+#if defined(__arm__)
+        funcOffset &= ~1;
+#endif
         DFXLOGU("Symbol relPc: %{public}" PRIx64 ", funcName: %{public}s, funcOffset: %{public}" PRIx64 "",
             relPc, funcName.c_str(), funcOffset);
         return true;

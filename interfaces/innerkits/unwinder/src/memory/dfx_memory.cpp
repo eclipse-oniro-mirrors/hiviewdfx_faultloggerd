@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include <atomic>
 #include "dfx_memory.h"
 #include <algorithm>
 #include <securec.h>
@@ -83,7 +84,11 @@ size_t DfxMemory::Read(uintptr_t& addr, void* val, size_t size, bool incre)
     uintptr_t tmpAddr = addr;
     uint64_t maxSize;
     if (val == nullptr || __builtin_add_overflow(tmpAddr, size, &maxSize)) {
-        DFXLOGE("val is nullptr or size(%{public}zu) overflow", size);
+        static std::atomic<uint64_t> overflowCnt {0};
+        if ((overflowCnt.fetch_add(1) % 1000) == 0) {
+            DFXLOGE("val is nullptr or size(%{public}zu) overflow, addr: 0x%{public}" PRIx64
+                ", total: %{public}" PRIx64 "", size, (uint64_t)tmpAddr, overflowCnt.load());
+        }
         return 0;
     }
     size_t bytesRead = 0;

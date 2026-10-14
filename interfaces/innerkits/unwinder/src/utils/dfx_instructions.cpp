@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include <atomic>
 #include "dfx_instructions.h"
 
 #include <algorithm>
@@ -108,7 +109,10 @@ bool DfxInstructions::GetCfa(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, R
             return false;
         }
     } else {
-        DFXLOGE("no cfa info exist?");
+        static std::atomic<uint64_t> noCfaCnt {0};
+        if ((noCfaCnt.fetch_add(1) % 100) == 0) {
+            DFXLOGE("no cfa info exist? total: %{public}" PRIx64 "", noCfaCnt.load());
+        }
         INSTR_STATISTIC(UnsupportedDefCfa, rsState.cfaReg, UNW_ERROR_NOT_SUPPORT);
         return false;
     }

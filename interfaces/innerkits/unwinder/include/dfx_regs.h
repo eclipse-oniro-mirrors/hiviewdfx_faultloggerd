@@ -23,7 +23,6 @@
 #include <vector>
 #include "dfx_define.h"
 #include "dfx_elf.h"
-#include "dfx_guest_state.h"
 #include "dfx_memory.h"
 #include "unwind_define.h"
 
@@ -56,11 +55,6 @@ public:
     uintptr_t* GetReg(size_t idx);
     void SetReg(const int idx, const uintptr_t* val);
 
-    // The special registers are virtual: the arm32 guest object (remote
-    // translated threads) stores r0-r15 flat and redirects them, while native
-    // objects keep the build-arch layout.
-    virtual ArchType Arch() const;
-    virtual bool IsGuestArm32() const { return false; }
     virtual uintptr_t GetSp() const;
     virtual void SetSp(uintptr_t sp);
     virtual uintptr_t GetPc() const;
@@ -121,36 +115,6 @@ class DfxRegsArm64 : public DfxRegs {
 public:
     DfxRegsArm64() = default;
     ~DfxRegsArm64() = default;
-    void SetFromUcontext(const ucontext_t& context) override;
-    void SetFromFpMiniRegs(const uintptr_t* regs, const size_t size) override;
-    void SetFromQutMiniRegs(const uintptr_t* regs, const size_t size) override;
-    std::string PrintRegs() const override;
-    bool SetPcFromReturnAddress(std::shared_ptr<DfxMemory> memory) override;
-    bool StepIfSignalFrame(uintptr_t pc, std::shared_ptr<DfxMemory> memory) override;
-};
-
-// Registers of a remote 32-bit ARM guest thread (binary translated, e.g.
-// ubt_a32a64). r0-r15 live in the flat slots 0-15 (the ARM32 DWARF numbering,
-// which is what exidx/dwarf CFI register numbers address); the special
-// registers are redirected to those slots. Slots above 15 stay zero.
-class DfxRegsGuestArm32 : public DfxRegs {
-public:
-    DfxRegsGuestArm32();
-    ~DfxRegsGuestArm32() = default;
-
-    void SetGuestRegs(const uint32_t regs[GUEST_ARM_LAST]);
-
-    ArchType Arch() const override { return ARCH_ARM; }
-    bool IsGuestArm32() const override { return true; }
-    uintptr_t GetSp() const override;
-    void SetSp(uintptr_t sp) override;
-    uintptr_t GetPc() const override;
-    void SetPc(uintptr_t pc) override;
-    uintptr_t GetFp() const override;
-    void SetFp(uintptr_t fp) override;
-    void GetSpecialRegs(uintptr_t& fp, uintptr_t& lr, uintptr_t& sp, uintptr_t& pc) const override;
-    void SetSpecialRegs(uintptr_t fp, uintptr_t lr, uintptr_t sp, uintptr_t pc) override;
-
     void SetFromUcontext(const ucontext_t& context) override;
     void SetFromFpMiniRegs(const uintptr_t* regs, const size_t size) override;
     void SetFromQutMiniRegs(const uintptr_t* regs, const size_t size) override;
