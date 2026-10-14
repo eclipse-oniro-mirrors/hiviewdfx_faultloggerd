@@ -18,16 +18,13 @@
 
 #include "dfx_define.h"
 #include "dfx_regs.h"
-#include "dfx_guest_state.h"
 #include "dfx_regs_qut.h"
 #include "dfx_log.h"
 #include "dfx_instr_statistic.h"
 #include "dfx_util.h"
 #include "string_printf.h"
 
-// Compiled for native arm32 targets and for the arm32 guest unwinding of the
-// aarch64 build; the GUEST_ARM_* constants carry the same values on both.
-#if defined(__arm__) || defined(__aarch64__)
+#if defined(__arm__)
 
 namespace OHOS {
 namespace HiviewDFX {
@@ -94,7 +91,7 @@ void ExidxContext::AddUpVsp(int32_t imm)
 void ExidxEntryParser::FlushInstr()
 {
     if (rsState_->cfaReg == 0) {
-        rsState_->cfaReg = GUEST_ARM_SP;
+        rsState_->cfaReg = REG_SP;
     }
     rsState_->cfaRegOffset = 0;
     if (context_.vsp != 0) {
@@ -119,9 +116,9 @@ void ExidxEntryParser::FlushInstr()
     }
 
     if (!isPcSet_) {
-        rsState_->returnAddressRegister = GUEST_ARM_LR;
+        rsState_->returnAddressRegister = REG_LR;
     } else {
-        rsState_->returnAddressRegister = GUEST_ARM_PC;
+        rsState_->returnAddressRegister = REG_PC;
     }
 
     context_.Reset();
@@ -444,9 +441,9 @@ bool ExidxEntryParser::Decode1000iiiiiiiiiiii()
 
     registers <<= FOUR_BIT_OFFSET;
     DFXLOGU("1000iiii iiiiiiii: registers: %{public}02x)", registers);
-    for (size_t reg = GUEST_ARM_R4; reg < GUEST_ARM_LAST; reg++) {
+    for (size_t reg = REG_ARM_R4; reg < REG_ARM_LAST; reg++) {
         if ((registers & (1 << reg))) {
-            if (GUEST_ARM_PC == reg) {
+            if (REG_PC == reg) {
                 isPcSet_ = true;
             }
             context_.Transform(reg);
@@ -459,13 +456,13 @@ bool ExidxEntryParser::Decode1000iiiiiiiiiiii()
 bool ExidxEntryParser::Decode1001nnnn()
 {
     uint8_t bits = curOp_ & 0xf;
-    if (bits == GUEST_ARM_R13 || bits == GUEST_ARM_R15) {
+    if (bits == REG_ARM_R13 || bits == REG_ARM_R15) {
         DFXLOGU("10011101 or 10011111: Reserved");
         lastErrorData_.SetCode(UNW_ERROR_RESERVED_VALUE);
         return false;
     }
     // 1001nnnn: Set vsp = r[nnnn]
-    if ((bits == GUEST_ARM_R7) || (bits == GUEST_ARM_R11)) {
+    if ((bits == REG_ARM_R7) || (bits == REG_ARM_R11)) {
         DFXLOGU("1001nnnn: Set vsp = R%{public}d", bits);
         if (context_.transformedBits == 0) {
             // No register transformed, ignore vsp offset.
@@ -484,8 +481,8 @@ bool ExidxEntryParser::Decode1010nnnn()
 {
     // 10100nnn: Pop r4-r[4+nnn]
     // 10101nnn: Pop r4-r[4+nnn], r14
-    size_t startReg = GUEST_ARM_R4;
-    size_t endReg = GUEST_ARM_R4 + (curOp_ & 0x7);
+    size_t startReg = REG_ARM_R4;
+    size_t endReg = REG_ARM_R4 + (curOp_ & 0x7);
     std::string msg = "Pop r" + std::to_string(startReg);
     if (endReg > startReg) {
         msg += "-r" + std::to_string(endReg);
@@ -501,7 +498,7 @@ bool ExidxEntryParser::Decode1010nnnn()
     }
 
     if (curOp_ & 0x8) {
-        context_.Transform(GUEST_ARM_LR);
+        context_.Transform(REG_LR);
         context_.AddUpVsp(FOUR_BYTE_OFFSET);
     }
     return true;

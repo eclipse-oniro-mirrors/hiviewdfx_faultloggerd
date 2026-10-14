@@ -233,6 +233,7 @@ struct FrameDescEntry {
     uintptr_t instructionsOff = 0;
     uintptr_t instructionsEnd = 0;
     uintptr_t cieAddr = 0;
+    uintptr_t ciePtrValue = 0;
     CommonInfoEntry cie;
 };
 

@@ -41,10 +41,6 @@ public:
     std::shared_ptr<DfxMmap> GetMmap() { return mmap_; }
     bool IsValid();
     uint8_t GetClassType();
-    // ELF32/EM_ARM image, i.e. an arm32 guest library of a translated process
-    // (on native arm32 targets every library qualifies). Such ELFs carry
-    // .ARM.exidx unwind tables instead of .eh_frame.
-    bool IsArm32Elf();
     ArchType GetArchType();
     uint64_t GetElfSize();
     std::string GetElfName();
@@ -117,7 +113,6 @@ protected:
 private:
     bool valid_ = false;
     uint8_t classType_ = 0;
-    uint16_t elfMachine_ = 0;
     int64_t loadBias_ = 0;
     uint64_t loadBase_ = static_cast<uint64_t>(-1);
     uint64_t startPc_ = static_cast<uint64_t>(-1);

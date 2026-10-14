@@ -13,6 +13,9 @@
  * limitations under the License.
  */
 
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
 #include "dfx_jit_debug.h"
 #include <algorithm>
 #include <cstring>
@@ -502,6 +505,38 @@ bool DfxJitDebug::ReadAllEntries(std::map<JitUID, std::shared_ptr<DfxElf>>* entr
 bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias)
 {
     std::lock_guard<std::mutex> guard(lock_);
+    // miss cache: collapse repeated lookups of the same unmatched pc, so we skip
+    // the O(entries) walk and the repeated error log. invalidated when the entry
+    // count changes, because jit code cache ranges can be reused after gc.
+    static std::mutex s_missMutex;
+    static std::unordered_set<uint64_t> s_missedPcs;
+    // hit cache: freeze the jit elf of the FIRST successful lookup per pc.
+    // the jit code cache may reclaim entries while a caller (e.g. hiperf
+    // delayed unwind) keeps unwinding samples of the same pc; the first
+    // result is the closest to sampling time, so reuse it for consistency.
+    static std::unordered_map<uint64_t, std::pair<std::shared_ptr<DfxElf>, uint64_t>> s_hitPcs;
+    static size_t s_entriesSizeWhenCached = 0;
+    {
+        std::lock_guard<std::mutex> missLock(s_missMutex);
+        size_t cached = s_entriesSizeWhenCached;
+        size_t nowSz = entries_.size();
+        size_t threshold = cached / 8;  // 12.5%
+        if (threshold < 4) { threshold = 4; }  // min guard
+        if ((nowSz > cached && nowSz - cached > threshold) ||
+            (cached > nowSz && cached - nowSz > threshold)) {
+            s_missedPcs.clear();
+            s_entriesSizeWhenCached = nowSz;
+        }
+        if (s_missedPcs.find(pc) != s_missedPcs.end()) {
+            return false;
+        }
+        auto hit = s_hitPcs.find(pc);
+        if (hit != s_hitPcs.end()) {
+            elf = hit->second.first;
+            loadBias = hit->second.second;
+            return true;
+        }
+    }
 
     if (descriptorAddr_ == 0) {
         // See EnsureJitDescriptorLocked: only conclusive per-pid failures are
@@ -544,12 +579,25 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
                 pc, jitElf->GetRuntimeStart(), jitElf->GetRuntimeEnd());
             elf = jitElf;
             loadBias = jitElf->GetLoadBias();
+            {
+                std::lock_guard<std::mutex> missLock(s_missMutex);
+                if (s_hitPcs.size() < 8192) {
+                    s_hitPcs[pc] = std::make_pair(jitElf, loadBias);
+                }
+            }
             return true;
         }
         DFXLOGU("FindJitElf: no match, pc=0x%{public}" PRIx64 ", range=[0x%{public}" PRIx64 ", 0x%{public}" PRIx64 ")",
             pc, jitElf->GetRuntimeStart(), jitElf->GetRuntimeEnd());
     }
 
+    {
+        std::lock_guard<std::mutex> missLock(s_missMutex);
+        constexpr size_t maxMissCacheSize = 8192;
+        if (s_missedPcs.size() < maxMissCacheSize) {
+            s_missedPcs.insert(pc);
+        }
+    }
     DFXLOGE("FindJitElf: no JIT ELF found for pc=0x%{public}" PRIx64 ", entries=%{public}zu", pc, entries_.size());
     return false;
 }

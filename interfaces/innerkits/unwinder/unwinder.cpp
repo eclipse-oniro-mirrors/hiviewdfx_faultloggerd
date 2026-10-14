@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include <atomic>
 #include "unwinder.h"
 
 #include <unordered_map>
@@ -22,7 +23,6 @@
 #include "dfx_define.h"
 #include "dfx_errors.h"
 #include "dfx_frame_formatter.h"
-#include "dfx_guest_state.h"
 #include "dfx_hap.h"
 #include "dfx_instructions.h"
 #include "dfx_jit_debug.h"
@@ -31,7 +31,6 @@
 #include "dfx_memory.h"
 #include "dfx_param.h"
 #include "dfx_regs_get.h"
-#include "dfx_regs_qut.h"
 #include "dfx_symbols.h"
 #include "dfx_trace_dlsym.h"
 #include "dfx_util.h"
@@ -187,27 +186,6 @@ public:
         }
         regs_ = regs;
         firstFrameSp_ = regs_->GetSp();
-        UpdateGuestArm32Mode();
-    }
-
-    // Arm32 guest mode (translated remote threads): swap the QUT register
-    // table to the arm32 layout so exidx locs and Apply stay consistent.
-    // SetQutRegs is process global, but one unwind session always targets a
-    // single process, and the table is restored when a native regs object is
-    // installed again (GetQutRegs falls back to the build default when empty).
-    inline void UpdateGuestArm32Mode()
-    {
-        bool guest = (regs_ != nullptr) && regs_->IsGuestArm32();
-        if (guest == isGuestArm32_) {
-            return;
-        }
-        isGuestArm32_ = guest;
-        if (isGuestArm32_) {
-            DfxRegsQut::SetQutRegs(GUEST_ARM_QUT_REGS);
-            DFXLOGI("Unwinder: arm32 guest mode on");
-        } else {
-            DfxRegsQut::SetQutRegs({});
-        }
     }
 
     inline void SetMaps(const std::shared_ptr<DfxMaps> &maps)
@@ -389,9 +367,6 @@ private:
     bool enableFpCheckMapExec_ = false;
     bool isCrash_ = false;
     bool isFpStep_ = false;
-    // Arm32 guest mode: regs_ holds the arm32 guest context of a translated
-    // remote thread; unwind through exidx/32-bit tables only.
-    bool isGuestArm32_ = false;
     bool isArkCreateLocal_ = false;
     bool isResetFrames_ = false;
     bool enableJsvmstack_ = false;
@@ -413,9 +388,6 @@ private:
     std::vector<uintptr_t> jitCache_ = {};
     std::shared_ptr<DfxMemory> memory_ = nullptr;
     std::unordered_map<uintptr_t, StepCache> stepCache_ {};
-    // Selected per unwind-table format: exidx tables of arm32 guest ELFs go
-    // to this parser, everything else to unwindEntryParser_ (dwarf).
-    std::shared_ptr<UnwindEntryParser> exidxEntryParser_ = nullptr;
     std::shared_ptr<DfxRegs> regs_ = nullptr;
     std::shared_ptr<DfxMaps> maps_ = nullptr;
     DfxJitDebug jitDebug_ {};
@@ -646,9 +618,6 @@ void Unwinder::Impl::Init()
 {
     Destroy();
     unwindEntryParser_ = UnwindEntryParserFactory::CreateUnwindEntryParser(memory_);
-#if defined(__aarch64__)
-    exidxEntryParser_ = std::make_shared<ExidxEntryParser>(memory_);
-#endif
     InitParam();
 #if defined(ENABLE_MIXSTACK)
     DFXLOGD("Unwinder mixstack enable: %{public}d", enableMixstack_);
@@ -812,7 +781,6 @@ bool Unwinder::Impl::UnwindRemote(pid_t tid, bool withRegs, size_t maxFrameNum, 
     }
     if (!withRegs) {
         regs_ = DfxRegs::CreateRemoteRegs(tid);
-        UpdateGuestArm32Mode();
     }
     if ((regs_ == nullptr)) {
         DFXLOGE("regs is nullptr");
@@ -1088,30 +1056,6 @@ bool Unwinder::Impl::FpStep(uintptr_t& fp, uintptr_t& pc, void *ctx)
         memory_->SetCtx(ctx);
     }
 
-    if (isGuestArm32_) {
-        // Arm32 guest frame chain: [fp]=saved fp, [fp+4]=return pc, both u32.
-        uintptr_t prevFp = fp;
-        uint32_t nextFp = 0;
-        uint32_t nextPc = 0;
-        uintptr_t pcAddr = fp + sizeof(uint32_t);
-        if (fp != 0 && memory_->Read<uint32_t>(fp, &nextFp, false) &&
-            memory_->Read<uint32_t>(pcAddr, &nextPc, false)) {
-            if (nextFp != 0 && nextFp <= prevFp) {
-                DFXLOGU("Illegal or same guest fp value");
-                lastErrorData_.SetAddrAndCode(nextPc, UNW_ERROR_ILLEGAL_VALUE);
-                return false;
-            }
-            fp = nextFp;
-            pc = nextPc;
-            regs_->SetFp(fp);
-            regs_->SetSp(prevFp);
-            regs_->SetPc(pc);
-            DFXLOGU("-guest fp: %{public}lx, pc: %{public}lx", (uint64_t)fp, (uint64_t)pc);
-            return true;
-        }
-        return false;
-    }
-
     uintptr_t prevFp = fp;
     uintptr_t ptr = fp;
     if (ptr != 0 && memory_->Read<uintptr_t>(ptr, &fp, true) &&
@@ -1260,12 +1204,6 @@ bool Unwinder::Impl::ParseUnwindTable(uintptr_t pc, std::shared_ptr<RegLocState>
     rs = std::make_shared<RegLocState>();
     // parse instructions and get cache rs
     std::shared_ptr<UnwindEntryParser> parser = unwindEntryParser_;
-#if defined(__aarch64__)
-    // Arm32 guest ELFs (translated processes) carry .ARM.exidx tables.
-    if (uti.format == UNW_INFO_FORMAT_ARM_EXIDX && exidxEntryParser_ != nullptr) {
-        parser = exidxEntryParser_;
-    }
-#endif
     if (!parser->Step(pc, uti, rs)) {
         lastErrorData_.SetAddrAndCode(parser->GetLastErrorAddr(), parser->GetLastErrorCode());
         DFXLOGU("Step unwind entry failed");
@@ -1280,8 +1218,7 @@ void Unwinder::Impl::StepToNextFpIfNeed()
     if (memory_ == nullptr || regs_ == nullptr) {
         return;
     }
-    // Arm32 guest chain: [fp]=saved fp, [fp+4]=return pc.
-    const uintptr_t pcSlotOff = isGuestArm32_ ? sizeof(uint32_t) : sizeof(uintptr_t);
+    const uintptr_t pcSlotOff = sizeof(uintptr_t);
     uintptr_t fpStepPc = 0;
     uintptr_t pcPtr = regs_->GetFp() + pcSlotOff;
     memory_->Read<uintptr_t>(pcPtr, &fpStepPc, false);
@@ -1289,13 +1226,7 @@ void Unwinder::Impl::StepToNextFpIfNeed()
     if (regs_->GetPc() == fpStepPc) {
         auto fp = regs_->GetFp();
         uintptr_t nextFp = 0;
-        if (isGuestArm32_) {
-            uint32_t guestNextFp = 0;
-            if (!memory_->Read<uint32_t>(fp, &guestNextFp, false)) {
-                return;
-            }
-            nextFp = guestNextFp;
-        } else if (!memory_->Read<uintptr_t>(fp, &nextFp, false)) {
+        if (!memory_->Read<uintptr_t>(fp, &nextFp, false)) {
             return;
         }
         // Only advance along a plausible fp chain. [fp] can hold arbitrary
@@ -1365,8 +1296,8 @@ void Unwinder::Impl::UpdateRegsState(
     // Save x22 (dex_pc) and x25 (xREFS) before Apply: the flush can
     // overwrite them even when Apply returns false, and StepNterp needs
     // the original live values to locate the nterp frame.
-    uintptr_t origDexPc = isGuestArm32_ ? 0 : (*regs_)[22]; // 22: x22 (xPC) on ARM64
-    uintptr_t origXRefs = isGuestArm32_ ? 0 : (*regs_)[25]; // 25: x25 (xREFS) on ARM64
+    uintptr_t origDexPc = (*regs_)[22]; // 22: x22 (xPC) on ARM64
+    uintptr_t origXRefs = (*regs_)[25]; // 25: x25 (xREFS) on ARM64
 #endif
     MAYBE_UNUSED bool noCallerInCfi = false;
     // True when this frame had no unwind table at all (the else path below).
@@ -1378,7 +1309,7 @@ void Unwinder::Impl::UpdateRegsState(
     MAYBE_UNUSED bool noUnwindTable = !unwinderResult;
     if (unwinderResult) {
 #if defined(__arm__) || defined(__aarch64__)
-    uintptr_t lr = isGuestArm32_ ? (*regs_)[GUEST_ARM_LR] : *(regs_->GetReg(REG_LR));
+    uintptr_t lr = *(regs_->GetReg(REG_LR));
 #endif
     uint16_t applyErrCode = 0;
     unwinderResult = Apply(regs_, rs, applyErrCode);
@@ -1411,7 +1342,7 @@ void Unwinder::Impl::UpdateRegsState(
     regs_->SetPc(StripPac(regs_->GetPc(), pacMask_));
 
 #if defined(__aarch64__)
-    if (!isGuestArm32_ && !unwinderResult) {
+    if (!unwinderResult) {
         unwinderResult = StepNterp(frame.pc, frame.sp, origDexPc, origXRefs);
         if (unwinderResult) {
             DFXLOGU("StepNterp success, pc: 0x%{public}" PRIx64 " -> 0x%{public}" PRIx64 "",
@@ -1419,7 +1350,7 @@ void Unwinder::Impl::UpdateRegsState(
             isFpStep_ = false;
         }
     }
-    if (!isGuestArm32_ && !unwinderResult && !noCallerInCfi) {
+    if (!unwinderResult && !noCallerInCfi) {
         unwinderResult = TryJitStep(frame.pc, ctx);
         if (unwinderResult && !isFpStep_) {
             if (pid_ != UNWIND_TYPE_CUSTOMIZE) {
@@ -1476,7 +1407,11 @@ void Unwinder::Impl::UpdateRegsState(
         unwinderResult = FpStep(frame.fp, frame.pc, ctx);
         if (unwinderResult && !isFpStep_) {
             if (pid_ != UNWIND_TYPE_CUSTOMIZE) {
-                DFXLOGI("First enter fp step, pc: %{private}p", reinterpret_cast<void *>(frame.pc));
+                static std::atomic<uint64_t> fpStepCnt {0};
+                if ((fpStepCnt.fetch_add(1) % 500) == 0) {
+                    DFXLOGI("First enter fp step, pc: %{private}p, total: %{public}" PRIx64 "",
+                        reinterpret_cast<void *>(frame.pc), fpStepCnt.load());
+                }
             }
             isFpStep_ = true;
         } else if (!unwinderResult && isFpStep_) {
@@ -1680,17 +1615,6 @@ void Unwinder::Impl::DoPcAdjust(uintptr_t& pc)
             sz = 0x2;
         }
     }
-#elif defined(__aarch64__)
-    if (isGuestArm32_ && (pc & 0x1) && (memory_ != nullptr)) {
-        // Thumb return address: inspect the word before the call site to tell
-        // a 4-byte BL from a 2-byte BL (same rule as the native arm32 build).
-        uint32_t val = 0;
-        uintptr_t insnAddr = pc - 0x5;
-        if (pc < 0x5 || !memory_->Read<uint32_t>(insnAddr, &val, false) ||
-            (val & 0xe000f000) != 0xe000f000) {
-            sz = 0x2;
-        }
-    }
 #elif defined(__x86_64__)
     sz = 0x1;
 #endif
@@ -1804,7 +1728,7 @@ void Unwinder::Impl::TryJitSymbolLookup(DfxFrame& frame)
     jitDebug.SetMaps(maps_);
     jitDebug.SetPid(pid_);
 #if defined(__aarch64__)
-    jitDebug.SetArch(isGuestArm32_ ? ARCH_ARM : ARCH_ARM64);
+    jitDebug.SetArch(ARCH_ARM64);
 #elif defined(__arm__)
     jitDebug.SetArch(ARCH_ARM);
 #elif defined(__x86_64__)
@@ -1867,7 +1791,7 @@ bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
     jitDebug.SetMaps(maps_);
     jitDebug.SetPid(pid_);
 #if defined(__aarch64__)
-    jitDebug.SetArch(isGuestArm32_ ? ARCH_ARM : ARCH_ARM64);
+    jitDebug.SetArch(ARCH_ARM64);
 #elif defined(__arm__)
     jitDebug.SetArch(ARCH_ARM);
 #elif defined(__x86_64__)

@@ -13,6 +13,10 @@
  * limitations under the License.
  */
 
+#include <atomic>
+#include <utility>
+#include <mutex>
+#include <unordered_map>
 #include "dwarf_entry_parser.h"
 #include <securec.h>
 #include "dfx_log.h"
@@ -44,9 +48,11 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
     uintptr_t i = 0;
     uintptr_t ptr = tableData;
     FrameDescEntry fdeInfo;
+    uintptr_t consecutiveSkips = 0;
     while (i++ < fdeCount && ptr < endBoundary) {
         uintptr_t fdeAddr = ptr;
         if (GetCieOrFde(ptr, fdeInfo)) {
+            consecutiveSkips = 0;
             if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
                 DFXLOGU("Fde entry addr: %{public}" PRIx64 "", (uint64_t)fdeAddr);
                 uei.unwindInfo = (void *)(fdeAddr);
@@ -54,7 +60,15 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
                 return true;
             }
         } else {
-            break;
+            // tolerate bad entry: GetCieOrFde advanced ptr to entry end.
+            // guard against no-progress/backward move and runaway skipping.
+            if (ptr <= fdeAddr) {
+                break;
+            }
+            if (++consecutiveSkips > 32) {
+                break;
+            }
+            continue;
         }
     }
     return false;
@@ -139,9 +153,10 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
     }
     memory_->SetDataOffset(uti.segbase);
 
-    FrameDescEntry fdeInfo;
-    if (!ParseFde((uintptr_t)uei.unwindInfo, (uintptr_t)uei.unwindInfo, fdeInfo)) {
-        DFXLOGE("Failed to parse fde?");
+    FrameDescEntry* fdeInfo = FindFde((uintptr_t)uei.unwindInfo, (uintptr_t)uei.unwindInfo);
+    if (fdeInfo == nullptr) {
+        DFXLOGE("Failed to parse fde? addr: 0x%{public}" PRIx64 ", isLinear: %{public}d, isDebugFrame: %{public}d, tableData: 0x%{public}" PRIx64 "",
+            (uint64_t)(uintptr_t)uei.unwindInfo, (int)uti.isLinear, (int)uti.isDebugFrame, (uint64_t)uti.tableData);
         lastErrorData_.SetAddrAndCode((uintptr_t)uei.unwindInfo, UNW_ERROR_DWARF_INVALID_FDE);
         memory_ = originalMemory;
         return false;
@@ -152,14 +167,14 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
         checkPc = pc - uti.segbase - uti.oatExecutableOffset;
     }
 
-    if (checkPc < fdeInfo.pcStart || checkPc >= fdeInfo.pcEnd) {
+    if (checkPc < fdeInfo->pcStart || checkPc >= fdeInfo->pcEnd) {
         DFXLOGU("pc: %{public}p, checkPc: %{public}p, FDE start: %{public}p, end: %{public}p",
-            (void*)pc, (void*)checkPc, (void*)fdeInfo.pcStart, (void*)fdeInfo.pcEnd);
+            (void*)pc, (void*)checkPc, (void*)fdeInfo->pcStart, (void*)fdeInfo->pcEnd);
         memory_ = originalMemory;
         return false;
     }
     DwarfCfaInstructions dwarfInstructions(memory_);
-    if (!dwarfInstructions.Parse(checkPc, fdeInfo, *(rs.get()))) {
+    if (!dwarfInstructions.Parse(checkPc, *fdeInfo, *(rs.get()))) {
         DFXLOGE("Failed to parse dwarf instructions?");
         lastErrorData_.SetAddrAndCode(checkPc, UNW_ERROR_DWARF_INVALID_INSTR);
         memory_ = originalMemory;
@@ -174,19 +189,31 @@ bool DwarfEntryParser::GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo)
     uintptr_t ptr = addr;
     bool isCieEntry = false;
     ParseCieOrFdeHeader(ptr, fdeInfo, isCieEntry);
+    uintptr_t entryEnd = isCieEntry ? fdeInfo.cie.instructionsEnd : fdeInfo.instructionsEnd;
 
     if (isCieEntry) {
         if (!ParseCie(addr, ptr, fdeInfo.cie)) {
             DFXLOGE("Failed to Parse CIE?");
+            // tolerate: advance to entry end so linear scan can skip this entry
+            addr = entryEnd;
             return false;
         }
         addr = fdeInfo.cie.instructionsEnd;
     } else {
-        if (!ParseFde(addr, ptr, fdeInfo)) {
-            DFXLOGE("Failed to Parse FDE?");
+        FrameDescEntry* fde = FindFde(addr, ptr);
+        if (fde == nullptr) {
+            static std::atomic<uint64_t> failCnt {0};
+            if ((failCnt.fetch_add(1) % 100) == 0) {
+                DFXLOGE("Failed to Parse FDE? addr: 0x%{public}" PRIx64 ", total: %{public}" PRIx64 "",
+                    (uint64_t)addr, failCnt.load());
+            }
+            // tolerate: advance to entry end so linear scan can skip this entry
+            addr = entryEnd;
             return false;
         }
-        addr = fdeInfo.instructionsEnd;
+        fdeInfo.pcStart = fde->pcStart;
+        fdeInfo.pcEnd = fde->pcEnd;
+        addr = fde->instructionsEnd;
     }
     return true;
 }
@@ -212,6 +239,7 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
                 : DW_EH_PE_sdata8;
         } else {
             fdeInfo.instructionsEnd = instructionsEnd;
+            fdeInfo.ciePtrValue = ciePtr;
             fdeInfo.cieAddr = isDebugFrame_ ? (entriesOffset_ + ciePtr) : static_cast<uintptr_t>(ptr - ciePtr);
         }
         ptr += sizeof(uint64_t);
@@ -227,44 +255,80 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
                 : DW_EH_PE_sdata4;
         } else {
             fdeInfo.instructionsEnd = instructionsEnd;
+            fdeInfo.ciePtrValue = ciePtr;
             fdeInfo.cieAddr = isDebugFrame_ ? (entriesOffset_ + ciePtr) : static_cast<uintptr_t>(ptr - ciePtr);
         }
         ptr += sizeof(uint32_t);
     }
 }
 
-bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEntry& fdeInfo)
+FrameDescEntry* DwarfEntryParser::FindFde(uintptr_t fdeAddr, uintptr_t fdePtr)
 {
-    if (!fdeEntries_.empty()) {
-        auto iter = fdeEntries_.find(fdeAddr);
-        if (iter != fdeEntries_.end()) {
-            fdeInfo = iter->second;
-            return true;
+    // R4: remember conclusively failed fdes (keyed with section base at failure
+    // time) so repeated lookups skip the full parse; bounded to avoid growth.
+    static std::mutex s_failMutex;
+    static std::unordered_map<uintptr_t, uintptr_t> s_failedFdes;
+    {
+        std::lock_guard<std::mutex> lock(s_failMutex);
+        auto it = s_failedFdes.find(fdeAddr);
+        if (it != s_failedFdes.end() && it->second == entriesOffset_) {
+            return nullptr;
         }
+    }
+    auto iter = fdeEntries_.find(fdeAddr);
+    if (iter != fdeEntries_.end()) {
+        return &iter->second; // cache hit without object copy
     }
 
-    if (fdeAddr == fdePtr) {
-        bool isCieEntry = false;
-        ParseCieOrFdeHeader(fdePtr, fdeInfo, isCieEntry);
-        if (isCieEntry) {
-            DFXLOGE("ParseFde error, is Cie Entry?");
-            return false;
+    FrameDescEntry fde; // local entry: header + fill, then move into cache
+    bool isCieEntry = false;
+    ParseCieOrFdeHeader(fdePtr, fde, isCieEntry);
+    if (isCieEntry) {
+        DFXLOGE("ParseFde error, is Cie Entry?");
+        return nullptr;
+    }
+    if (!FillInFde(fdePtr, fde)) {
+        static std::atomic<uint64_t> failCnt {0};
+        if ((failCnt.fetch_add(1) % 100) == 0) {
+            DFXLOGE("ParseFde error, failed to fill FDE? fdeAddr: 0x%{public}" PRIx64 ", total: %{public}" PRIx64 "",
+                (uint64_t)fdeAddr, failCnt.load());
         }
-    }
-    if (!FillInFde(fdePtr, fdeInfo)) {
-        DFXLOGE("ParseFde error, failed to fill FDE?");
+        {
+            std::lock_guard<std::mutex> lock(s_failMutex);
+            if (s_failedFdes.size() < 8192) {
+                s_failedFdes[fdeAddr] = entriesOffset_;
+            }
+        }
         fdeEntries_.erase(fdeAddr);
-        return false;
+        return nullptr;
     }
-    fdeEntries_[fdeAddr] = fdeInfo;
-    return true;
+    auto ret = fdeEntries_.emplace(fdeAddr, std::move(fde));
+    return &ret.first->second;
 }
 
 bool DwarfEntryParser::FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo)
 {
     if (!ParseCie(fdeInfo.cieAddr, fdeInfo.cieAddr, fdeInfo.cie)) {
-        DFXLOGE("Failed to parse CIE?");
-        return false;
+        // R2: some producers emit debug_frame style absolute cie pointer inside
+        // an eh_frame section; retry with absolute convention before giving up.
+        uintptr_t altCieAddr = entriesOffset_ + fdeInfo.ciePtrValue;
+        if (!isDebugFrame_ && altCieAddr != fdeInfo.cieAddr &&
+            altCieAddr >= entriesOffset_ && altCieAddr < ptr &&
+            ParseCie(altCieAddr, altCieAddr, fdeInfo.cie)) {
+            static std::atomic<uint64_t> altCnt {0};
+            if ((altCnt.fetch_add(1) % 100) == 0) {
+                DFXLOGI("cie addr fixed by absolute convention: 0x%{public}" PRIx64
+                    ", total: %{public}" PRIx64 "", (uint64_t)altCieAddr, altCnt.load());
+            }
+            fdeInfo.cieAddr = altCieAddr;
+        } else {
+            static std::atomic<uint64_t> failCnt {0};
+            if ((failCnt.fetch_add(1) % 100) == 0) {
+                DFXLOGE("Failed to parse CIE? cieAddr: 0x%{public}" PRIx64 ", total: %{public}" PRIx64 "",
+                    (uint64_t)fdeInfo.cieAddr, failCnt.load());
+            }
+            return false;
+        }
     }
 
     if (fdeInfo.cie.segmentSize != 0) {
@@ -319,7 +383,11 @@ bool DwarfEntryParser::ParseCie(uintptr_t cieAddr, uintptr_t ciePtr, CommonInfoE
         FrameDescEntry fdeInfo;
         ParseCieOrFdeHeader(ciePtr, fdeInfo, isCieEntry);
         if (!isCieEntry) {
-            DFXLOGE("ParseCie error, is not Cie Entry?");
+            static std::atomic<uint64_t> failCnt {0};
+            if ((failCnt.fetch_add(1) % 100) == 0) {
+                DFXLOGE("ParseCie error, is not Cie Entry? cieAddr: 0x%{public}" PRIx64 ", total: %{public}" PRIx64 "",
+                    (uint64_t)cieAddr, failCnt.load());
+            }
             return false;
         }
         cieInfo = fdeInfo.cie;
@@ -414,13 +482,40 @@ bool DwarfEntryParser::FillInCie(uintptr_t ptr, CommonInfoEntry& cieInfo)
     DFXLOGU("returnAddressRegister: %{public}d", static_cast<int>(cieInfo.returnAddressRegister));
 
     // parse augmentation data based on augmentation string
-    if (augStr.empty() || augStr[0] != 'z') {
+    if (augStr.empty()) {
         cieInfo.instructionsOff = ptr;
         return true;
     }
-    cieInfo.hasAugmentationData = true;
-    ParseAugData(ptr, cieInfo, augStr);
-
+    if (augStr[0] == 'z') {
+        cieInfo.hasAugmentationData = true;
+        ParseAugData(ptr, cieInfo, augStr);
+        return true;
+    }
+    // legacy augmentation without length prefix: parse known chars inline,
+    // stop at unknown char (instructions offset then stays at current ptr).
+    for (size_t i = 0; i < augStr.size(); ++i) {
+        switch (augStr[i]) {
+            case 'P': {
+                uint8_t personalityEncoding = 0;
+                memory_->Read<uint8_t>(ptr, &personalityEncoding, true);
+                cieInfo.personality = memory_->ReadEncodedValue(ptr, personalityEncoding);
+                break;
+            }
+            case 'L':
+                memory_->Read<uint8_t>(ptr, &cieInfo.lsdaEncoding, true);
+                break;
+            case 'R':
+                memory_->Read<uint8_t>(ptr, &cieInfo.pointerEncoding, true);
+                break;
+            case 'S':
+                cieInfo.isSignalFrame = true;
+                break;
+            default:
+                i = augStr.size(); // stop scanning
+                break;
+        }
+    }
+    cieInfo.instructionsOff = ptr;
     return true;
 }
 }   // namespace HiviewDFX

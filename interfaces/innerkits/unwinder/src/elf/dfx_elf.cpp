@@ -100,11 +100,6 @@ bool DfxElf::InitHeaders()
         return false;
     }
 
-    // e_machine sits at the same offset (0x12) in the ELF32 and ELF64 headers.
-    if (!Read(0x12, &elfMachine_, sizeof(elfMachine_))) {
-        return false;
-    }
-
     if (classType_ == ELFCLASS32) {
         elfParse_ = std::unique_ptr<ElfParser>(new ElfParser32(mmap_));
     } else if (classType_ == ELFCLASS64) {
@@ -133,14 +128,6 @@ uint8_t DfxElf::GetClassType()
         return classType_;
     }
     return ELFCLASSNONE;
-}
-
-bool DfxElf::IsArm32Elf()
-{
-    if (!IsValid()) {
-        return false;
-    }
-    return classType_ == ELFCLASS32 && elfMachine_ == EM_ARM;
 }
 
 ArchType DfxElf::GetArchType()
@@ -640,10 +627,8 @@ int DfxElf::FindUnwindTableInfo(uintptr_t pc, std::shared_ptr<DfxMap> map, struc
 
 
     ShdrInfo shdr;
-#if defined(__arm__) || defined(__aarch64__)
-    // .ARM.exidx based tables: every ELF of a native arm32 target, and the
-    // arm32 guest libraries of translated processes on aarch64 hosts.
-    if (IsArm32Elf() && GetSectionInfo(shdr, ARM_EXIDX)) {
+#if defined(__arm__)
+    if (GetSectionInfo(shdr, ARM_EXIDX)) {
         hasTableInfo_ = FillUnwindTableByExidx(shdr, loadBase, &uti);
     }
 #endif
