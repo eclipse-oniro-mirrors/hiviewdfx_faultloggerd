@@ -62,8 +62,13 @@ std::string DfxFrameFormatter::GetFrameStr(const DfxFrame& frame)
             if (!frame.originSoName.empty()) {
                 data += ":" + frame.originSoName;
             }
+        } else if (frame.map != nullptr) {
+            data += StringPrintf(" <anonymous:%" PRIx64 ">", frame.map->begin);
         } else {
             data += " [Unknown]";
+        }
+        if (frame.elfOffset != 0) {
+            data += StringPrintf(" (offset 0x%" PRIx64 ")", frame.elfOffset);
         }
         if (!frame.funcName.empty() &&
             frame.funcName.length() <= MAX_FUNC_NAME_LEN) {

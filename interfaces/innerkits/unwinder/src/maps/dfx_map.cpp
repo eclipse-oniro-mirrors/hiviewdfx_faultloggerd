@@ -305,7 +305,12 @@ bool DfxMap::IsArkWebJsExecutable()
 
 bool DfxMap::IsVdsoMap()
 {
-    if ((name == "[shmm]" || name == "[vdso]") && IsMapExec()) {
+    // Match both the bare "[shmm]"/"[vdso]" form and the /proc/<pid>/root-
+    // prefixed form (map names may be stored as "/proc/<pid>/root[shmm]" after
+    // sandbox path formatting). An exact == check would miss the prefixed form,
+    // so the FpStep gate (UpdateRegsState) would not skip these pseudo-maps and
+    // would garbage-chase the frame pointer, stopping the unwind at 2 frames.
+    if (IsMapExec() && (EndsWith(name, "[shmm]") || EndsWith(name, "[vdso]"))) {
         return true;
     }
     return false;
@@ -398,8 +403,11 @@ std::string DfxMap::GetElfName()
         return name;
     }
     std::string soName = name;
-    if (EndsWith(name, ".hap")) {
-        soName.append("!" + elf->GetElfName());
+    if (EndsWith(name, ".hap") || EndsWith(name, ".apk")) {
+        std::string inner = elf->GetElfName();
+        if (!inner.empty()) {
+            soName.append("!" + inner);
+        }
     }
     return soName;
 }
@@ -429,19 +437,30 @@ void DfxMap::FormatMapName(pid_t pid, std::string& mapName)
         return;
     }
 
-    // format sandbox file path, add '/proc/xxx/root' prefix
-    if (StartsWith(mapName, SANDBOX_FILE_PATH_PREFIX)) {
-        mapName = "/proc/" + std::to_string(pid) + "/root" + mapName;
+    // Prefix every absolute file path (not only sandbox /data/storage paths)
+    // with /proc/<pid>/root so file opens reach the target's mount namespace.
+    // Remote unwinding runs in the caller's namespace, where bare /apex or
+    // /system paths may not exist (observed as ENOENT in DfxElf/ElfFactory
+    // and DfxJitDebug::FindJitDescriptor); /proc/<pid>/root always resolves to
+    // the target's view and is reachable once the caller ptrace-attaches.
+    // Skip empty/pseudo entries ([vdso]/[shmm]/[anon:...]/[heap]/[stack], which
+    // start with '['), bare driver names (no '/'), and already-formatted names.
+    if (mapName.empty() || mapName[0] != '/' || StartsWith(mapName, "/proc/")) {
+        return;
     }
+    mapName = "/proc/" + std::to_string(pid) + "/root" + mapName;
 }
 
 std::string DfxMap::UnFormatMapName(const std::string& mapName)
 {
-    // unformat sandbox file path, drop '/proc/xxx/root' prefix
+    // Drop the '/proc/<pid>/root' prefix added by FormatMapName so the real
+    // target-namespace path is used for display/matching. Apply to every
+    // prefixed path, not only /data/storage (FormatMapName now prefixes all
+    // absolute file paths). Mirrors IsFileBackedMapName's stripping.
     if (StartsWith(mapName, "/proc/")) {
-        auto startPos = mapName.find(SANDBOX_FILE_PATH_PREFIX);
-        if (startPos != std::string::npos) {
-            return mapName.substr(startPos);
+        auto rootPos = mapName.find("/root");
+        if (rootPos != std::string::npos) {
+            return mapName.substr(rootPos + static_cast<size_t>(sizeof("/root")) - 1);
         }
     }
     return mapName;

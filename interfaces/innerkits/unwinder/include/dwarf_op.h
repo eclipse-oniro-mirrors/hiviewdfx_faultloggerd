@@ -22,6 +22,7 @@
 #include <memory>
 #include "dfx_errors.h"
 #include "dfx_instr_statistic.h"
+#include "dfx_log.h"
 #include "dfx_memory.h"
 #include "dfx_regs.h"
 #include "dfx_regs_qut.h"
@@ -41,6 +42,14 @@ public:
     virtual ~DwarfOp() = default;
 
     AddressType Eval(DfxRegs& regs, AddressType initStackValue, AddressType startPtr);
+
+    // AOSP16-style DEX1 magic: when the DWARF expression for a register starts
+    // with the byte sequence  DW_OP_const4u 'D' 'E' 'X' '1'  DW_OP_drop,
+    // the evaluated value is the interpreted Java method's dex_pc and should
+    // be stored in the dex_pc pseudo-register instead of the normal register.
+    // See libunwindstack DwarfOp::Eval for the reference implementation.
+    bool DexPcSet() const { return dex_pc_set_; }
+    void ResetDexPcFlag() { dex_pc_set_ = false; }
 
 protected:
     static constexpr size_t STACK_SIZE_CHECK = 2;
@@ -452,26 +461,36 @@ protected:
     inline void OpBReg(uint8_t opcode, AddressType& exprPtr, DfxRegs& regs)
     {
         auto reg = static_cast<uint32_t>(opcode - DW_OP_breg0);
-        size_t qutIdx = 0;
-        if (!DfxRegsQut::IsQutReg(static_cast<uint16_t>(reg), qutIdx)) {
+        // Match libunwindstack op_breg: any register is allowed (bounds
+        // check only). ART nterp_helper's DEX PC rule reads x22 via
+        // DW_OP_breg22, which is outside the QUT table.
+        if (reg >= regs.RegsSize()) {
             INSTR_STATISTIC(UnsupportedDwarfOp_Breg, reg, UNW_ERROR_UNSUPPORTED_QUT_REG);
             return;
         }
-        auto value = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
-        value += static_cast<SignedType>(regs[reg]);
+        auto offset = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
+        auto regVal = static_cast<SignedType>(regs[reg]);
+        auto value = offset + regVal;
+        DFXLOGU("OpBReg: op=0x%{public}x, reg=%{public}u, regVal=0x%{public}" PRIx64
+            ", offset=%{public}ld, push=0x%{public}" PRIx64 "",
+            opcode, reg, (uint64_t)regVal, (long)offset, (uint64_t)value);
         stack_.push_front(value);
     };
 
     inline void OpBRegx(AddressType& exprPtr, DfxRegs& regs)
     {
         auto reg = static_cast<uint32_t>(memory_->ReadUleb128(exprPtr));
-        size_t qutIdx = 0;
-        if (!DfxRegsQut::IsQutReg(static_cast<uint16_t>(reg), qutIdx)) {
+        // See OpBReg: no QUT restriction, only a bounds check.
+        if (reg >= regs.RegsSize()) {
             INSTR_STATISTIC(UnsupportedDwarfOp_Bregx, reg, UNW_ERROR_UNSUPPORTED_QUT_REG);
+            DFXLOGU("OpBRegx: reg=%{public}u out of bounds, skip", reg);
             return;
         }
-        auto value = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
-        value += static_cast<SignedType>(regs[reg]);
+        auto offset = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
+        auto regVal = static_cast<SignedType>(regs[reg]);
+        auto value = offset + regVal;
+        DFXLOGU("OpBRegx: reg=%{public}u, regVal=0x%{public}" PRIx64 ", offset=%{public}ld, push=0x%{public}" PRIx64 "",
+            reg, (uint64_t)regVal, (long)offset, (uint64_t)value);
         stack_.push_front(value);
     };
 
@@ -483,6 +502,7 @@ protected:
 protected:
     std::shared_ptr<DfxMemory> memory_;
     std::deque<AddressType> stack_;
+    bool dex_pc_set_ = false;
 };
 } // nameapace HiviewDFX
 } // nameapace OHOS

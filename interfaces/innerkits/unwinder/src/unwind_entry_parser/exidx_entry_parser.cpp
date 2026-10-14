@@ -18,13 +18,16 @@
 
 #include "dfx_define.h"
 #include "dfx_regs.h"
+#include "dfx_guest_state.h"
 #include "dfx_regs_qut.h"
 #include "dfx_log.h"
 #include "dfx_instr_statistic.h"
 #include "dfx_util.h"
 #include "string_printf.h"
 
-#if defined(__arm__)
+// Compiled for native arm32 targets and for the arm32 guest unwinding of the
+// aarch64 build; the GUEST_ARM_* constants carry the same values on both.
+#if defined(__arm__) || defined(__aarch64__)
 
 namespace OHOS {
 namespace HiviewDFX {
@@ -91,7 +94,7 @@ void ExidxContext::AddUpVsp(int32_t imm)
 void ExidxEntryParser::FlushInstr()
 {
     if (rsState_->cfaReg == 0) {
-        rsState_->cfaReg = REG_SP;
+        rsState_->cfaReg = GUEST_ARM_SP;
     }
     rsState_->cfaRegOffset = 0;
     if (context_.vsp != 0) {
@@ -116,9 +119,9 @@ void ExidxEntryParser::FlushInstr()
     }
 
     if (!isPcSet_) {
-        rsState_->returnAddressRegister = REG_LR;
+        rsState_->returnAddressRegister = GUEST_ARM_LR;
     } else {
-        rsState_->returnAddressRegister = REG_PC;
+        rsState_->returnAddressRegister = GUEST_ARM_PC;
     }
 
     context_.Reset();
@@ -184,18 +187,18 @@ bool ExidxEntryParser::SearchEntry(uintptr_t pc, const UnwindTableInfo &uti, str
 
 bool ExidxEntryParser::ExtractEntryData(uintptr_t entryOffset)
 {
-    DFXLOGU("Exidx entryOffset: %{public}llx", (uint64_t)entryOffset);
+    DFXLOGU("Exidx entryOffset: %{public}" PRIx64, (uint64_t)entryOffset);
     ops_.clear();
     uint32_t data = 0;
     if (entryOffset & 1) {
-        DFXLOGE("[%{public}d]: entryOffset: %{public}llx error.", __LINE__, (uint64_t)entryOffset);
+        DFXLOGE("[%{public}d]: entryOffset: %{public}" PRIx64 " error.", __LINE__, (uint64_t)entryOffset);
         lastErrorData_.SetAddrAndCode(entryOffset, UNW_ERROR_INVALID_ALIGNMENT);
         return false;
     }
 
     entryOffset += FOUR_BYTE_OFFSET;
     if (!memory_->Read<uint32_t>(entryOffset, &data, false)) {
-        DFXLOGE("[%{public}d]: entryOffset: %{public}llx error.", __LINE__, (uint64_t)entryOffset);
+        DFXLOGE("[%{public}d]: entryOffset: %{public}" PRIx64 " error.", __LINE__, (uint64_t)entryOffset);
         lastErrorData_.SetAddrAndCode(entryOffset, UNW_ERROR_ILLEGAL_VALUE);
         return false;
     }
@@ -289,7 +292,7 @@ bool ExidxEntryParser::ExtractEntryTabByPersonality(uintptr_t& tabOffset, uint32
 bool ExidxEntryParser::ExtractEntryTab(uintptr_t tabOffset)
 {
     uint32_t data = 0;
-    DFXLOGU("Exidx tabOffset: %{public}llx", static_cast<uint64_t>(tabOffset));
+    DFXLOGU("Exidx tabOffset: %{public}" PRIx64, static_cast<uint64_t>(tabOffset));
     if (!memory_->Read<uint32_t>(tabOffset, &data, false)) {
         lastErrorData_.SetAddrAndCode(tabOffset, UNW_ERROR_INVALID_MEMORY);
         return false;
@@ -330,7 +333,7 @@ inline bool ExidxEntryParser::GetOpCode()
     }
     curOp_ = ops_.front();
     ops_.pop_front();
-    DFXLOGU("curOp: %{public}llx", (uint64_t)curOp_);
+    DFXLOGU("curOp: %{public}" PRIx64, (uint64_t)curOp_);
     return true;
 }
 
@@ -441,9 +444,9 @@ bool ExidxEntryParser::Decode1000iiiiiiiiiiii()
 
     registers <<= FOUR_BIT_OFFSET;
     DFXLOGU("1000iiii iiiiiiii: registers: %{public}02x)", registers);
-    for (size_t reg = REG_ARM_R4; reg < REG_ARM_LAST; reg++) {
+    for (size_t reg = GUEST_ARM_R4; reg < GUEST_ARM_LAST; reg++) {
         if ((registers & (1 << reg))) {
-            if (REG_PC == reg) {
+            if (GUEST_ARM_PC == reg) {
                 isPcSet_ = true;
             }
             context_.Transform(reg);
@@ -456,13 +459,13 @@ bool ExidxEntryParser::Decode1000iiiiiiiiiiii()
 bool ExidxEntryParser::Decode1001nnnn()
 {
     uint8_t bits = curOp_ & 0xf;
-    if (bits == REG_ARM_R13 || bits == REG_ARM_R15) {
+    if (bits == GUEST_ARM_R13 || bits == GUEST_ARM_R15) {
         DFXLOGU("10011101 or 10011111: Reserved");
         lastErrorData_.SetCode(UNW_ERROR_RESERVED_VALUE);
         return false;
     }
     // 1001nnnn: Set vsp = r[nnnn]
-    if ((bits == REG_ARM_R7) || (bits == REG_ARM_R11)) {
+    if ((bits == GUEST_ARM_R7) || (bits == GUEST_ARM_R11)) {
         DFXLOGU("1001nnnn: Set vsp = R%{public}d", bits);
         if (context_.transformedBits == 0) {
             // No register transformed, ignore vsp offset.
@@ -481,8 +484,8 @@ bool ExidxEntryParser::Decode1010nnnn()
 {
     // 10100nnn: Pop r4-r[4+nnn]
     // 10101nnn: Pop r4-r[4+nnn], r14
-    size_t startReg = REG_ARM_R4;
-    size_t endReg = REG_ARM_R4 + (curOp_ & 0x7);
+    size_t startReg = GUEST_ARM_R4;
+    size_t endReg = GUEST_ARM_R4 + (curOp_ & 0x7);
     std::string msg = "Pop r" + std::to_string(startReg);
     if (endReg > startReg) {
         msg += "-r" + std::to_string(endReg);
@@ -498,7 +501,7 @@ bool ExidxEntryParser::Decode1010nnnn()
     }
 
     if (curOp_ & 0x8) {
-        context_.Transform(REG_LR);
+        context_.Transform(GUEST_ARM_LR);
         context_.AddUpVsp(FOUR_BYTE_OFFSET);
     }
     return true;

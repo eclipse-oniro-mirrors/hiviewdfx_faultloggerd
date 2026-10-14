@@ -22,13 +22,16 @@
 #include "dfx_define.h"
 #include "dfx_errors.h"
 #include "dfx_frame_formatter.h"
+#include "dfx_guest_state.h"
 #include "dfx_hap.h"
 #include "dfx_instructions.h"
+#include "dfx_jit_debug.h"
 #include "dfx_jsvm.h"
 #include "dfx_log.h"
 #include "dfx_memory.h"
 #include "dfx_param.h"
 #include "dfx_regs_get.h"
+#include "dfx_regs_qut.h"
 #include "dfx_symbols.h"
 #include "dfx_trace_dlsym.h"
 #include "dfx_util.h"
@@ -49,6 +52,31 @@ namespace HiviewDFX {
 #if defined(__x86_64__)
 const size_t X86_FP_SP_OFFSET = 16;
 #endif
+
+#if defined(__aarch64__) || defined(__x86_64__)
+// Stack-scan fallback (StepByScan): bound the scan window and the number of
+// scan-adopted frames per unwind so a broken stack cannot cause unbounded work.
+constexpr size_t SCAN_WINDOW_WORDS = 64; // 64 words = 512 bytes above sp
+constexpr uint8_t MAX_SCAN_STEPS = 2;
+#endif
+
+// JIT-compiled code only ever lives in anonymous or memfd mappings; a pc inside
+// a named file mapping (.so / .oat / .apk) can never match a
+// __jit_debug_descriptor entry, so the JIT registry scan can be skipped for it.
+static bool IsFileBackedMapName(std::string name)
+{
+    // Strip the "/proc/<pid>/root" sandbox prefix (added by DfxMap::FormatMapName)
+    // first: pseudo entries like "[shmm]" / "[anon:dalvik-...]" would otherwise
+    // start with '/' and be mistaken for file paths, which would skip the JIT
+    // lookup for anonymous executable regions (e.g. the ART JIT cache).
+    if (name.rfind("/proc/", 0) == 0) {
+        size_t pos = name.find("/root");
+        if (pos != std::string::npos) {
+            name = name.substr(pos + static_cast<size_t>(sizeof("/root")) - 1);
+        }
+    }
+    return !name.empty() && name[0] == '/' && name.find("/memfd:") == std::string::npos;
+}
 
 class Unwinder::Impl {
 public:
@@ -159,6 +187,27 @@ public:
         }
         regs_ = regs;
         firstFrameSp_ = regs_->GetSp();
+        UpdateGuestArm32Mode();
+    }
+
+    // Arm32 guest mode (translated remote threads): swap the QUT register
+    // table to the arm32 layout so exidx locs and Apply stay consistent.
+    // SetQutRegs is process global, but one unwind session always targets a
+    // single process, and the table is restored when a native regs object is
+    // installed again (GetQutRegs falls back to the build default when empty).
+    inline void UpdateGuestArm32Mode()
+    {
+        bool guest = (regs_ != nullptr) && regs_->IsGuestArm32();
+        if (guest == isGuestArm32_) {
+            return;
+        }
+        isGuestArm32_ = guest;
+        if (isGuestArm32_) {
+            DfxRegsQut::SetQutRegs(GUEST_ARM_QUT_REGS);
+            DFXLOGI("Unwinder: arm32 guest mode on");
+        } else {
+            DfxRegsQut::SetQutRegs({});
+        }
     }
 
     inline void SetMaps(const std::shared_ptr<DfxMaps> &maps)
@@ -167,6 +216,21 @@ public:
             return;
         }
         maps_ = maps;
+    }
+
+    inline void SetPid(pid_t pid)
+    {
+        // Reusing one Unwinder for another pid must not keep the previous
+        // pid's JIT descriptor/entries cache.
+        if (pid > 0 && pid != pid_) {
+            pid_ = pid;
+            jitDebug_.Clear();
+        }
+    }
+
+    void SetEnableScanStep(bool enable)
+    {
+        enableScanStep_ = enable;
     }
 
     inline const std::shared_ptr<DfxRegs>& GetRegs() const
@@ -209,6 +273,7 @@ public:
     }
     void FillFrames(std::vector<DfxFrame>& frames);
     void FillFrame(DfxFrame& frame, bool needSymParse = true);
+    void FillDexFrame(DfxFrame& frame);
     void ParseFrameSymbol(DfxFrame& frame);
     void FillJsFrame(DfxFrame& frame);
     void FillArkwebJsFrame(DfxFrame& frame);
@@ -270,14 +335,26 @@ private:
     bool UnwindArkFrame(StepFrame& frame, const std::shared_ptr<DfxMap>& map, bool& stopUnwind);
     bool ParseUnwindTable(uintptr_t pc, std::shared_ptr<RegLocState>& rs);
     void StepToNextFpIfNeed();
-    void UpdateRegsState(StepFrame& frame, void* ctx, bool& unwinderResult, std::shared_ptr<RegLocState>& rs);
+    void UpdateRegsState(StepFrame& frame, void* ctx, bool& unwinderResult, std::shared_ptr<RegLocState>& rs,
+        const std::shared_ptr<DfxMap>& frameMap);
     bool CheckFrameValid(const StepFrame& frame, const std::shared_ptr<DfxMap>& map, uintptr_t prevSp);
     bool GetCrashLastFrame(StepFrame& frame);
     void UpdateCache(uintptr_t pc, bool hasRegLocState, const std::shared_ptr<RegLocState>& rs,
         const std::shared_ptr<DfxMap>& map);
     bool StepInner(const bool isSigFrame, StepFrame& frame, void *ctx);
-    bool Apply(std::shared_ptr<DfxRegs> regs, std::shared_ptr<RegLocState> rs);
+    bool Apply(std::shared_ptr<DfxRegs> regs, std::shared_ptr<RegLocState> rs, uint16_t& errCode);
     bool UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc);
+    bool TryJitStep(uintptr_t pc, void *ctx);
+    bool StepByScan(uintptr_t sp, uintptr_t currentPc);
+    bool StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDexPc, uintptr_t origXRefs);
+    // AOSP16-style DEX frame injection: called at the start of each StepInner
+    // iteration. If a previous DWARF Step set the dex_pc pseudo-register (via
+    // the DEX1 magic marker in libart.so's CFI), inject a virtual DEX frame
+    // for the interpreted Java method before the current native frame is
+    // added. This produces the canonical stack ordering:
+    //   ... | nterp_helper | <DEX frame> | caller-of-nterp_helper | ...
+    void InjectDexFrameFromDwarf();
+    void TryJitSymbolLookup(DfxFrame& frame);
 #if defined(ENABLE_MIXSTACK)
     bool StepArkJsFrame(StepFrame& frame, uint64_t frameIndex = 0);
     int UnwindArkFrameByFp(StepFrame& frame, const ArkMapRange& arkMapRange, uint64_t& frameIndex);
@@ -312,6 +389,9 @@ private:
     bool enableFpCheckMapExec_ = false;
     bool isCrash_ = false;
     bool isFpStep_ = false;
+    // Arm32 guest mode: regs_ holds the arm32 guest context of a translated
+    // remote thread; unwind through exidx/32-bit tables only.
+    bool isGuestArm32_ = false;
     bool isArkCreateLocal_ = false;
     bool isResetFrames_ = false;
     bool enableJsvmstack_ = false;
@@ -320,14 +400,25 @@ private:
     MAYBE_UNUSED bool stopWhenArkFrame_ = false;
     MAYBE_UNUSED bool isJitCrash_ = false;
     uintptr_t arkwebJsExtractorptr_ = 0;
+    // Last pc produced by the LR fallback (see UpdateRegsState). LR is only
+    // refreshed by a successful DWARF Apply (x30 rule); falling back to an
+    // already-consumed LR value never advances the unwind.
+    uintptr_t lastLrFallbackPc_ = 0;
+    // Last-resort stack scan (off by default; enable via SetEnableScanStep).
+    bool enableScanStep_ = false;
+    uint8_t scanUsedCount_ = 0;
 
     int32_t pid_ = 0;
     uintptr_t pacMask_ = 0;
     std::vector<uintptr_t> jitCache_ = {};
     std::shared_ptr<DfxMemory> memory_ = nullptr;
     std::unordered_map<uintptr_t, StepCache> stepCache_ {};
+    // Selected per unwind-table format: exidx tables of arm32 guest ELFs go
+    // to this parser, everything else to unwindEntryParser_ (dwarf).
+    std::shared_ptr<UnwindEntryParser> exidxEntryParser_ = nullptr;
     std::shared_ptr<DfxRegs> regs_ = nullptr;
     std::shared_ptr<DfxMaps> maps_ = nullptr;
+    DfxJitDebug jitDebug_ {};
     std::vector<uintptr_t> pcs_ {};
     std::vector<DfxFrame> frames_ {};
     UnwindErrorData lastErrorData_ {};
@@ -398,6 +489,16 @@ void Unwinder::SetRegs(std::shared_ptr<DfxRegs> regs)
 void Unwinder::SetMaps(std::shared_ptr<DfxMaps> maps)
 {
     impl_->SetMaps(maps);
+}
+
+void Unwinder::SetPid(pid_t pid)
+{
+    impl_->SetPid(pid);
+}
+
+void Unwinder::SetEnableScanStep(bool enable)
+{
+    impl_->SetEnableScanStep(enable);
 }
 
 const std::shared_ptr<DfxRegs>& Unwinder::GetRegs() const
@@ -545,6 +646,9 @@ void Unwinder::Impl::Init()
 {
     Destroy();
     unwindEntryParser_ = UnwindEntryParserFactory::CreateUnwindEntryParser(memory_);
+#if defined(__aarch64__)
+    exidxEntryParser_ = std::make_shared<ExidxEntryParser>(memory_);
+#endif
     InitParam();
 #if defined(ENABLE_MIXSTACK)
     DFXLOGD("Unwinder mixstack enable: %{public}d", enableMixstack_);
@@ -556,6 +660,7 @@ void Unwinder::Impl::Init()
 void Unwinder::Impl::Clear()
 {
     isFpStep_ = false;
+    scanUsedCount_ = 0;
     enableMixstack_ = true;
     pcs_.clear();
     frames_.clear();
@@ -707,6 +812,7 @@ bool Unwinder::Impl::UnwindRemote(pid_t tid, bool withRegs, size_t maxFrameNum, 
     }
     if (!withRegs) {
         regs_ = DfxRegs::CreateRemoteRegs(tid);
+        UpdateGuestArm32Mode();
     }
     if ((regs_ == nullptr)) {
         DFXLOGE("regs is nullptr");
@@ -826,6 +932,11 @@ bool Unwinder::Impl::UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc
         StepInner(true, frame, ctx);
         return true;
     }
+    // pc before DoPcAdjust: the raw return address produced by the previous
+    // step. An LR fallback that re-consumes a stale LR bounces the pc between
+    // lr and lr-4 (the adjust), so the repeated-frame check below must compare
+    // against rawPc as well, not only the adjusted entry pc.
+    uintptr_t rawPc = frame.pc;
     if (!frame.isJsFrame && needAdjustPc) {
         DoPcAdjust(frame.pc);
     }
@@ -836,7 +947,8 @@ bool Unwinder::Impl::UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc
         return false;
     }
     // The first frame may not have been updated on the pc and sp, when lr fall back
-    if (frame.pc == prevPc && frame.sp == prevSp && frames_.size() > 1) {
+    if (frame.sp == prevSp && frames_.size() > 1 &&
+        (frame.pc == prevPc || frame.pc == rawPc)) {
         if (pid_ >= 0) {
             MAYBE_UNUSED UnwindContext* uctx = reinterpret_cast<UnwindContext *>(ctx);
             DFXLOGU("pc and sp is same, tid: %{public}d", uctx->pid);
@@ -861,6 +973,7 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
 
     bool needAdjustPc = false;
     isResetFrames_ = false;
+    lastLrFallbackPc_ = 0;
     StepFrame frame;
     do {
         if (!isResetFrames_ && (skipFrameNum != 0) && (frames_.size() >= skipFrameNum)) {
@@ -975,6 +1088,30 @@ bool Unwinder::Impl::FpStep(uintptr_t& fp, uintptr_t& pc, void *ctx)
         memory_->SetCtx(ctx);
     }
 
+    if (isGuestArm32_) {
+        // Arm32 guest frame chain: [fp]=saved fp, [fp+4]=return pc, both u32.
+        uintptr_t prevFp = fp;
+        uint32_t nextFp = 0;
+        uint32_t nextPc = 0;
+        uintptr_t pcAddr = fp + sizeof(uint32_t);
+        if (fp != 0 && memory_->Read<uint32_t>(fp, &nextFp, false) &&
+            memory_->Read<uint32_t>(pcAddr, &nextPc, false)) {
+            if (nextFp != 0 && nextFp <= prevFp) {
+                DFXLOGU("Illegal or same guest fp value");
+                lastErrorData_.SetAddrAndCode(nextPc, UNW_ERROR_ILLEGAL_VALUE);
+                return false;
+            }
+            fp = nextFp;
+            pc = nextPc;
+            regs_->SetFp(fp);
+            regs_->SetSp(prevFp);
+            regs_->SetPc(pc);
+            DFXLOGU("-guest fp: %{public}lx, pc: %{public}lx", (uint64_t)fp, (uint64_t)pc);
+            return true;
+        }
+        return false;
+    }
+
     uintptr_t prevFp = fp;
     uintptr_t ptr = fp;
     if (ptr != 0 && memory_->Read<uintptr_t>(ptr, &fp, true) &&
@@ -1044,6 +1181,22 @@ bool Unwinder::Impl::FindCache(uintptr_t pc, std::shared_ptr<DfxMap>& map, std::
 bool Unwinder::Impl::AddFrameMap(const StepFrame& frame, std::shared_ptr<DfxMap>& map)
 {
     int mapRet = memory_->GetMapByPc(frame.pc, map);
+    if (mapRet != UNW_ERROR_NONE && maps_ != nullptr) {
+        // The accessor-provided maps can lag behind the target's live mappings:
+        // customize callers (e.g. hiperf) feed perf-recorded maps, which never
+        // learn about reserve+mprotect regions such as the ART JIT cache, and a
+        // map miss here would cut the callchain short. Retry with our own
+        // /proc snapshot before treating the pc as unmapped. Only an executable
+        // map counts: a pc in a non-exec region is garbage either way.
+        std::shared_ptr<DfxMap> snapshotMap;
+        if (maps_->FindMapByAddr(static_cast<uintptr_t>(frame.pc), snapshotMap) &&
+            snapshotMap != nullptr && snapshotMap->IsMapExec()) {
+            map = snapshotMap;
+            mapRet = UNW_ERROR_NONE;
+            DFXLOGU("Frame map found by snapshot fallback, pc: 0x%{public}" PRIx64
+                ", map: %{public}s", (uint64_t)frame.pc, map->name.c_str());
+        }
+    }
     if (mapRet != UNW_ERROR_NONE) {
         if (frame.isJsFrame) {
             DFXLOGW("Failed to get js frame map, frames size: %{public}zu", frames_.size());
@@ -1106,8 +1259,15 @@ bool Unwinder::Impl::ParseUnwindTable(uintptr_t pc, std::shared_ptr<RegLocState>
     }
     rs = std::make_shared<RegLocState>();
     // parse instructions and get cache rs
-    if (!unwindEntryParser_->Step(pc, uti, rs)) {
-        lastErrorData_.SetAddrAndCode(unwindEntryParser_->GetLastErrorAddr(), unwindEntryParser_->GetLastErrorCode());
+    std::shared_ptr<UnwindEntryParser> parser = unwindEntryParser_;
+#if defined(__aarch64__)
+    // Arm32 guest ELFs (translated processes) carry .ARM.exidx tables.
+    if (uti.format == UNW_INFO_FORMAT_ARM_EXIDX && exidxEntryParser_ != nullptr) {
+        parser = exidxEntryParser_;
+    }
+#endif
+    if (!parser->Step(pc, uti, rs)) {
+        lastErrorData_.SetAddrAndCode(parser->GetLastErrorAddr(), parser->GetLastErrorCode());
         DFXLOGU("Step unwind entry failed");
         return false;
     }
@@ -1120,31 +1280,123 @@ void Unwinder::Impl::StepToNextFpIfNeed()
     if (memory_ == nullptr || regs_ == nullptr) {
         return;
     }
+    // Arm32 guest chain: [fp]=saved fp, [fp+4]=return pc.
+    const uintptr_t pcSlotOff = isGuestArm32_ ? sizeof(uint32_t) : sizeof(uintptr_t);
     uintptr_t fpStepPc = 0;
-    uintptr_t pcPtr = regs_->GetFp() + sizeof(uintptr_t);
+    uintptr_t pcPtr = regs_->GetFp() + pcSlotOff;
     memory_->Read<uintptr_t>(pcPtr, &fpStepPc, false);
     // if the pc which is step by fp is duplicated with the current frame, update fp val to next frame
     if (regs_->GetPc() == fpStepPc) {
         auto fp = regs_->GetFp();
         uintptr_t nextFp = 0;
-        memory_->Read<uintptr_t>(fp, &nextFp, false);
-        regs_->SetFp(nextFp);
+        if (isGuestArm32_) {
+            uint32_t guestNextFp = 0;
+            if (!memory_->Read<uint32_t>(fp, &guestNextFp, false)) {
+                return;
+            }
+            nextFp = guestNextFp;
+        } else if (!memory_->Read<uintptr_t>(fp, &nextFp, false)) {
+            return;
+        }
+        // Only advance along a plausible fp chain. [fp] can hold arbitrary
+        // data (e.g. a Java object pointer read while the fp belongs to a
+        // native frame reached via LR fallback); blindly adopting it clobbers
+        // the fp and dooms the later FpStep. FpStep itself requires the chain
+        // to grow, so require the same here.
+        if (nextFp > fp) {
+            regs_->SetFp(nextFp);
+        }
     }
 #endif
 }
 
+bool Unwinder::Impl::StepByScan(uintptr_t sp, uintptr_t currentPc)
+{
+#if defined(__aarch64__) || defined(__x86_64__)
+    if (memory_ == nullptr || maps_ == nullptr || sp == 0) {
+        return false;
+    }
+    // Last-resort stack scan (AOSP ScanFrame style), reached only when every
+    // other strategy failed: no unwind info for the pc (third-party libs such
+    // as libttffmpeg.so / libsscronet.so ship most of .text without
+    // .eh_frame), LR is stale or a no-op, and the fp chain is unusable
+    // (-fomit-frame-pointer). Walk the stack upwards from sp and adopt the
+    // first word that plausibly is a saved return address: 4-byte aligned and
+    // pointing into an executable mapping. The caller's saved RA usually sits
+    // within a few dozen words of sp, so the 512-byte window suffices.
+    for (size_t i = 0; i < SCAN_WINDOW_WORDS; i++) {
+        uintptr_t addr = sp + i * sizeof(uintptr_t);
+        uintptr_t val = 0;
+        if (!memory_->ReadMem(addr, &val)) {
+            break; // left the readable stack
+        }
+        uintptr_t candidate = StripPac(val, pacMask_);
+        // aarch64: instructions are 4-byte aligned. x86_64: no alignment
+        // requirement — the mask only discards values unlikely to be
+        // return addresses.
+        if ((candidate & 0x3) != 0) {
+            continue;
+        }
+        if (candidate == currentPc) {
+            continue; // no progress
+        }
+        std::shared_ptr<DfxMap> map;
+        if (!maps_->FindMapByAddr(candidate, map) || map == nullptr || !map->IsMapExec()) {
+            continue;
+        }
+        regs_->SetPc(candidate);
+        regs_->SetSp(addr + sizeof(uintptr_t));
+        DFXLOGU("StepByScan: adopted pc: %{private}p from slot %{private}p (sp: %{private}p)",
+            reinterpret_cast<void *>(candidate), reinterpret_cast<void *>(addr), reinterpret_cast<void *>(sp));
+        return true;
+    }
+    DFXLOGU("StepByScan: no candidate in [%{private}p, %{private}p)",
+        reinterpret_cast<void *>(sp), reinterpret_cast<void *>(sp + SCAN_WINDOW_WORDS * sizeof(uintptr_t)));
+#endif
+    return false;
+}
+
 void Unwinder::Impl::UpdateRegsState(
-    StepFrame& frame, void* ctx, bool& unwinderResult, std::shared_ptr<RegLocState>& rs)
+    StepFrame& frame, void* ctx, bool& unwinderResult, std::shared_ptr<RegLocState>& rs,
+    const std::shared_ptr<DfxMap>& frameMap)
 {
     SetLocalStackCheck(ctx, true);
+#if defined(__aarch64__)
+    // Save x22 (dex_pc) and x25 (xREFS) before Apply: the flush can
+    // overwrite them even when Apply returns false, and StepNterp needs
+    // the original live values to locate the nterp frame.
+    uintptr_t origDexPc = isGuestArm32_ ? 0 : (*regs_)[22]; // 22: x22 (xPC) on ARM64
+    uintptr_t origXRefs = isGuestArm32_ ? 0 : (*regs_)[25]; // 25: x25 (xREFS) on ARM64
+#endif
+    MAYBE_UNUSED bool noCallerInCfi = false;
+    // True when this frame had no unwind table at all (the else path below).
+    // The LR fallback is only allowed for such frames and runs AFTER
+    // StepNterp/TryJitStep: an anonymous executable pc (e.g. in the ART JIT
+    // cache) must get its JIT step first, because that is the only fallback
+    // which also restores sp/fp correctly. An LR fallback cannot update sp/fp,
+    // so the next frame is evaluated with a stale sp and produces garbage.
+    MAYBE_UNUSED bool noUnwindTable = !unwinderResult;
     if (unwinderResult) {
 #if defined(__arm__) || defined(__aarch64__)
-    auto lr = *(regs_->GetReg(REG_LR));
+    uintptr_t lr = isGuestArm32_ ? (*regs_)[GUEST_ARM_LR] : *(regs_->GetReg(REG_LR));
 #endif
-    unwinderResult = Apply(regs_, rs);
+    uint16_t applyErrCode = 0;
+    unwinderResult = Apply(regs_, rs, applyErrCode);
+    // The CFI explicitly says this frame has no caller (DW_CFA_undefined on the
+    // return-address register; typical for noreturn / outermost frames).
+    // libunwindstack ends the unwind here. Treat it as end-of-stack: falling
+    // through to TryJitStep/FpStep would fabricate frames from stale fp values
+    // (observed as garbage libicu_jni frames after a RETURN_ADDRESS_UNDEFINED
+    // failure, followed by an fp-mode stall loop). StepNterp is still allowed
+    // below: it self-validates (libart map + nterp callee-saves layout).
+    if (!unwinderResult && applyErrCode == UNW_ERROR_RETURN_ADDRESS_UNDEFINED) {
+        noCallerInCfi = true;
+    }
 #if defined(__arm__) || defined(__aarch64__)
-    if (!unwinderResult && enableLrFallback_ && (frames_.size() == 1)) {
+    if (!unwinderResult && enableLrFallback_ && (frames_.size() == 1) &&
+        StripPac(lr, pacMask_) != StripPac(regs_->GetPc(), pacMask_)) {
         regs_->SetPc(lr);
+        lastLrFallbackPc_ = StripPac(lr, pacMask_);
         unwinderResult = true;
         if (pid_ != UNWIND_TYPE_CUSTOMIZE) {
             DFXLOGW("Failed to apply first frame, lr fallback");
@@ -1152,24 +1404,98 @@ void Unwinder::Impl::UpdateRegsState(
     }
 #endif
     } else {
-        if (enableLrFallback_ && (frames_.size() == 1 && !isResetFrames_) && regs_->SetPcFromReturnAddress(memory_)) {
-            unwinderResult = true;
-            StepToNextFpIfNeed();
-            if (pid_ != UNWIND_TYPE_CUSTOMIZE) {
-                DFXLOGW("Failed to step first frame, lr fallback");
-            }
-        }
+        // No unwind table for this frame. The LR fallback used to run here,
+        // before StepNterp/TryJitStep; it now runs after them (see below) so
+        // JIT-cache frames are stepped with correct sp/fp first.
     }
     regs_->SetPc(StripPac(regs_->GetPc(), pacMask_));
 
+#if defined(__aarch64__)
+    if (!isGuestArm32_ && !unwinderResult) {
+        unwinderResult = StepNterp(frame.pc, frame.sp, origDexPc, origXRefs);
+        if (unwinderResult) {
+            DFXLOGU("StepNterp success, pc: 0x%{public}" PRIx64 " -> 0x%{public}" PRIx64 "",
+                (uint64_t)frame.pc, (uint64_t)regs_->GetPc());
+            isFpStep_ = false;
+        }
+    }
+    if (!isGuestArm32_ && !unwinderResult && !noCallerInCfi) {
+        unwinderResult = TryJitStep(frame.pc, ctx);
+        if (unwinderResult && !isFpStep_) {
+            if (pid_ != UNWIND_TYPE_CUSTOMIZE) {
+                DFXLOGU("First enter jit step, pc: %{private}p", reinterpret_cast<void *>(frame.pc));
+            }
+            isFpStep_ = false;
+        }
+    }
+#endif
+    // LR fallback, last resort before FpStep (only for frames without an
+    // unwind table; see noUnwindTable). In fp step mode DWARF no longer runs,
+    // so LR is frozen at the value captured when fp mode was entered — using
+    // it would repeatedly pull pc back to that stale LR and form a 2-cycle
+    // with FpStep, so it is skipped in fp mode.
+    // LR is only refreshed by a successful DWARF Apply (x30 rule); FpStep and
+    // StepNterp leave it untouched. Falling back to an already-consumed LR makes
+    // no progress (the pc only oscillates between lr and lr-4 through DoPcAdjust,
+    // which also defeats the pc==lr guard inside SetPcFromReturnAddress), so each
+    // LR value is consumed at most once per unwind. Also reject when the target
+    // equals the current pc: the frame's pc typically came from the same RA stack
+    // slot Apply just restored into LR, and PAC plus the ±4 DoPcAdjust hide this
+    // equality from the pc==lr guard inside SetPcFromReturnAddress; such a
+    // fallback reproduces the identical frame and ends the unwind at
+    // UnwindFrame's repeated-frame check. A rejected fallback keeps
+    // unwinderResult false so FpStep still gets a chance to run.
+    if (!unwinderResult && noUnwindTable && enableLrFallback_ && !isResetFrames_ && !isFpStep_) {
+        uintptr_t pcBefore = regs_->GetPc();
+        if (regs_->SetPcFromReturnAddress(memory_)) {
+            uintptr_t fallbackPc = StripPac(regs_->GetPc(), pacMask_);
+            if (fallbackPc != lastLrFallbackPc_ && fallbackPc != StripPac(pcBefore, pacMask_)) {
+                lastLrFallbackPc_ = fallbackPc;
+                unwinderResult = true;
+                StepToNextFpIfNeed();
+                DFXLOGU("LR fallback: old_pc=%{private}p -> new_pc=%{private}p",
+                    reinterpret_cast<void *>(frame.pc), reinterpret_cast<void *>(regs_->GetPc()));
+            } else {
+                // Stale or no-op LR: restore pc, do not claim success.
+                regs_->SetPc(pcBefore);
+                DFXLOGU("LR fallback skipped: stale or no-op lr %{private}p", reinterpret_cast<void *>(fallbackPc));
+            }
+        }
+    }
 #if defined(__aarch64__) || defined(__x86_64__)
-    if (!unwinderResult) { // try fp
+    // try fp. Skip for vDSO-type maps (IsVdsoMap covers [vdso] and [shmm]):
+    // these pseudo-mappings are parsed as in-memory ELF by VdsoElfFactory and,
+    // when that yields no unwind table, the frame pointer register does not hold
+    // a reliable frame pointer (the code is a kernel/shared-memory stub, not
+    // frame-pointer-compiled user code). Chasing [fp] there fabricates garbage
+    // frames from stack residue and, by marking the step successful, also blocks
+    // the bounded StepByScan fallback below. The ART JIT cache (fp==0) already
+    // fast-fails FpStep, so it is unaffected.
+    if (!unwinderResult && !noCallerInCfi &&
+        !(frameMap != nullptr && frameMap->IsVdsoMap())) {
         unwinderResult = FpStep(frame.fp, frame.pc, ctx);
         if (unwinderResult && !isFpStep_) {
             if (pid_ != UNWIND_TYPE_CUSTOMIZE) {
                 DFXLOGI("First enter fp step, pc: %{private}p", reinterpret_cast<void *>(frame.pc));
             }
             isFpStep_ = true;
+        } else if (!unwinderResult && isFpStep_) {
+            // The fp chain is broken (e.g. the next fp did not increase). Leave fp
+            // mode so the next frame retries DWARF: in fp mode StepInner skips
+            // ParseUnwindTable entirely, so a broken chain would otherwise stall
+            // the unwind with no way out. If DWARF (and the other fallbacks) also
+            // fail, UnwindFrame's repeated-frame guard terminates the unwind.
+            isFpStep_ = false;
+        }
+    }
+    if (!unwinderResult && enableScanStep_ && scanUsedCount_ < MAX_SCAN_STEPS) {
+        // Stack scan, final fallback after all strategies failed. Bounded by
+        // MAX_SCAN_STEPS per unwind; a scanned frame is a best-effort guess
+        // (stack residue may cause a jump), so it is opt-in (default off).
+        scanUsedCount_++;
+        unwinderResult = StepByScan(frame.sp, StripPac(regs_->GetPc(), pacMask_));
+        if (unwinderResult) {
+            isFpStep_ = false;
         }
     }
 #endif
@@ -1224,9 +1550,16 @@ bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ct
         DFXLOGE("params is nullptr");
         return false;
     }
+    // AOSP16-style: if a previous DWARF Step set dex_pc (via the DEX1 magic
+    // marker in libart.so's CFI for nterp_helper), inject a virtual DEX
+    // frame BEFORE the current native frame is added. The dex_pc points
+    // into a mapped DEX/vdex/apk/jar file and represents the interpreted
+    // Java method's current PC. Must run before any AddFrame call below.
+    InjectDexFrameFromDwarf();
     SetLocalStackCheck(ctx, false);
     DFXLOGU("+pc: %{public}p, sp: %{public}p, fp: %{public}p", reinterpret_cast<void *>(frame.pc),
         reinterpret_cast<void *>(frame.sp), reinterpret_cast<void *>(frame.fp));
+    uintptr_t prevPc = frame.pc;
     uintptr_t prevSp = frame.sp;
     bool hasRegLocState = false;
     std::shared_ptr<RegLocState> rs = nullptr;
@@ -1241,6 +1574,9 @@ bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ct
 
         // 2. find map and process frame
         if (!AddFrameMap(frame, map)) {
+            DFXLOGU("StepInner: AddFrameMap failed, pc=0x%{public}" PRIx64 ", sp=0x%{public}" PRIx64
+                ", dexPc=0x%{public}" PRIx64 ", seen=%{public}d",
+                (uint64_t)frame.pc, (uint64_t)frame.sp, (uint64_t)regs_->DexPc(), (int)regs_->DexPcSeen());
             if (!GetCrashLastFrame(frame)) {
                 return false;
             }
@@ -1276,33 +1612,56 @@ bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ct
     } while (false);
 
     // 5. update regs and regs state
-    UpdateRegsState(frame, ctx, hasRegLocState, rs);
-    return CheckFrameValid(frame, map, prevSp) ? hasRegLocState : false;
+    UpdateRegsState(frame, ctx, hasRegLocState, rs, map);
+    if (!CheckFrameValid(frame, map, prevSp)) {
+        return false;
+    }
+    // hasRegLocState is true when DWARF succeeds.
+    // UpdateRegsState may succeed via LR fallback or JIT step even if DWARF fails.
+    // In those cases, frame.pc/sp/fp have been updated to the next frame's values,
+    // so we should return true to continue unwinding.
+    if (hasRegLocState || frame.pc != prevPc) {
+        return true;
+    }
+    return false;
 }
 
-bool Unwinder::Impl::Apply(std::shared_ptr<DfxRegs> regs, std::shared_ptr<RegLocState> rs)
+bool Unwinder::Impl::Apply(std::shared_ptr<DfxRegs> regs, std::shared_ptr<RegLocState> rs, uint16_t& errCode)
 {
+    errCode = 0;
     if (rs == nullptr || regs == nullptr) {
+        errCode = UNW_ERROR_INVALID_REGS;
         return false;
     }
 
     uintptr_t prevPc = regs->GetPc();
     uintptr_t prevSp = regs->GetSp();
-    uint16_t errCode = 0;
     bool ret = DfxInstructions::Apply(memory_, *(regs.get()), *(rs.get()), errCode);
-    uintptr_t tmp = 0;
-    uintptr_t sp = regs->GetSp();
-    if (ret && (!memory_->Read<uintptr_t>(sp, &tmp, false))) {
-        errCode = UNW_ERROR_UNREADABLE_SP;
-        ret = false;
-    }
+    // Do NOT verify that the new SP is readable after a successful DWARF
+    // Apply: the return-address register can be correct while the
+    // CFA-derived SP is not a usable stack value (nterp_helper's CFA is
+    // computed from the live xREFS register). A bogus SP terminates the
+    // unwind on its own: reads through it fail on the next steps, and the
+    // next frame recomputes its own SP from its own CFI.
     if (StripPac(regs->GetPc(), pacMask_) == prevPc && regs->GetSp() == prevSp) {
+        DFXLOGU("Apply: repeated frame, pc=0x%{public}" PRIx64 ", sp=0x%{public}" PRIx64
+            "", (uint64_t)prevPc, (uint64_t)prevSp);
         errCode = UNW_ERROR_REPEATED_FRAME;
         ret = false;
     }
+    if (ret) {
+        DFXLOGU("Apply: success, prevPc=0x%{public}" PRIx64 " -> newPc=0x%{public}" PRIx64
+            ", prevSp=0x%{public}" PRIx64 " -> newSp=0x%{public}" PRIx64
+            ", dexPc=0x%{public}" PRIx64 ", seen=%{public}d",
+            (uint64_t)prevPc, (uint64_t)regs->GetPc(), (uint64_t)prevSp, (uint64_t)regs->GetSp(),
+            (uint64_t)regs->DexPc(), (int)regs->DexPcSeen());
+    }
     if (!ret) {
         lastErrorData_.SetCode(errCode);
-        DFXLOGU("Failed to apply reg state, errCode: %{public}d", static_cast<int>(errCode));
+        DFXLOGU("Failed to apply reg state, errCode: %{public}d, prevPc=0x%{public}" PRIx64
+            ", prevSp=0x%{public}" PRIx64 ", newPc=0x%{public}" PRIx64 ", newSp=0x%{public}" PRIx64 "",
+            static_cast<int>(errCode), (uint64_t)prevPc, (uint64_t)prevSp,
+            (uint64_t)regs->GetPc(), (uint64_t)regs->GetSp());
     }
     return ret;
 }
@@ -1317,6 +1676,17 @@ void Unwinder::Impl::DoPcAdjust(uintptr_t& pc)
     if ((pc & 0x1) && (memory_ != nullptr)) {
         uintptr_t val;
         if (pc < 0x5 || !(memory_->ReadMem(pc - 0x5, &val)) ||
+            (val & 0xe000f000) != 0xe000f000) {
+            sz = 0x2;
+        }
+    }
+#elif defined(__aarch64__)
+    if (isGuestArm32_ && (pc & 0x1) && (memory_ != nullptr)) {
+        // Thumb return address: inspect the word before the call site to tell
+        // a 4-byte BL from a 2-byte BL (same rule as the native arm32 build).
+        uint32_t val = 0;
+        uintptr_t insnAddr = pc - 0x5;
+        if (pc < 0x5 || !memory_->Read<uint32_t>(insnAddr, &val, false) ||
             (val & 0xe000f000) != 0xe000f000) {
             sz = 0x2;
         }
@@ -1395,6 +1765,8 @@ void Unwinder::Impl::FillFrames(std::vector<DfxFrame>& frames)
 #endif
         } else if (frame.frameType == FrameType::ARKWEB_JS_FRAME) {
             FillArkwebJsFrame(frame);
+        } else if (frame.frameType == FrameType::DEX_FRAME) {
+            FillDexFrame(frame);
         } else {
             FillFrame(frame, enableParseNativeSymbol_);
         }
@@ -1409,13 +1781,460 @@ void Unwinder::Impl::ParseFrameSymbol(DfxFrame& frame)
     pid_t pid = pid_ <= 0 ? getpid() : pid_;
     auto elf = frame.map->GetElf(pid);
     if (elf == nullptr) {
+        TryJitSymbolLookup(frame);
         return;
     }
     if (!DfxSymbols::GetFuncNameAndOffsetByPc(frame.relPc, elf, frame.funcName, frame.funcOffset)) {
+        TryJitSymbolLookup(frame);
         DFXLOGU("Failed to get symbol, relPc: 0x%{public}" PRIx64 ", pc: 0x%{public}" PRIx64 ", mapName: %{public}s",
             frame.relPc, frame.pc, frame.mapName.c_str());
     }
     frame.parseSymbolState.SetParseSymbolState(true);
+}
+
+void Unwinder::Impl::TryJitSymbolLookup(DfxFrame& frame)
+{
+    // See IsFileBackedMapName: a pc in a named file mapping cannot be JIT code,
+    // so the JIT symbol registry cannot contain it either.
+    if (frame.map != nullptr && IsFileBackedMapName(frame.map->name)) {
+        return;
+    }
+    auto& jitDebug = jitDebug_;
+    jitDebug.SetMemory(memory_);
+    jitDebug.SetMaps(maps_);
+    jitDebug.SetPid(pid_);
+#if defined(__aarch64__)
+    jitDebug.SetArch(isGuestArm32_ ? ARCH_ARM : ARCH_ARM64);
+#elif defined(__arm__)
+    jitDebug.SetArch(ARCH_ARM);
+#elif defined(__x86_64__)
+    jitDebug.SetArch(ARCH_X86_64);
+#elif defined(__i386__)
+    jitDebug.SetArch(ARCH_X86);
+#elif defined(__riscv) && defined(__riscv64)
+    jitDebug.SetArch(ARCH_RISCV64);
+#else
+    return;
+#endif
+
+    JitSymbolInfo info;
+    if (!jitDebug.GetJitSymbolInfo(frame.pc, info)) {
+        DFXLOGU("No JIT ELF found for pc: 0x%{public}" PRIx64, frame.pc);
+        return;
+    }
+
+    if (info.elf == nullptr || !info.elf->IsValid()) {
+        return;
+    }
+
+    uint64_t relPc = frame.pc;
+    if (info.loadBias != 0 && info.loadBias != static_cast<uint64_t>(-1)) {
+        relPc = frame.pc - info.loadBias;
+    } else {
+        relPc = frame.pc - info.startPc;
+    }
+
+    DFXLOGU("JIT lookup: pc=0x%{public}" PRIx64 ", loadBias=0x%{public}" PRIx64
+        ", startPc=0x%{public}" PRIx64 ", endPc=0x%{public}" PRIx64 ", relPc=0x%{public}" PRIx64,
+        frame.pc, info.loadBias, info.startPc, info.endPc, relPc);
+
+    if (!DfxSymbols::GetFuncNameAndOffsetByPc(relPc, info.elf, frame.funcName, frame.funcOffset)) {
+        DFXLOGU("Failed to get JIT symbol, relPc: 0x%{public}" PRIx64 ", pc: 0x%{public}" PRIx64,
+            relPc, frame.pc);
+        return;
+    }
+
+    DFXLOGU("Found JIT symbol: funcName: %{public}s, relPc: 0x%{public}" PRIx64,
+        frame.funcName.c_str(), relPc);
+    frame.parseSymbolState.SetParseSymbolState(true);
+}
+
+bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
+{
+    DFX_TRACE_SCOPED_DLSYM("TryJitStep:%p", reinterpret_cast<void *>(pc));
+    // JIT-compiled code never lives in a named file mapping (see IsFileBackedMapName),
+    // so skip the registry scan for such pcs before doing any work.
+    if (maps_ != nullptr) {
+        std::shared_ptr<DfxMap> map;
+        if (memory_->GetMapByPc(pc, map) == UNW_ERROR_NONE && map != nullptr &&
+            IsFileBackedMapName(map->name)) {
+            return false;
+        }
+    }
+
+    auto& jitDebug = jitDebug_;
+    jitDebug.SetMemory(memory_);
+    jitDebug.SetMaps(maps_);
+    jitDebug.SetPid(pid_);
+#if defined(__aarch64__)
+    jitDebug.SetArch(isGuestArm32_ ? ARCH_ARM : ARCH_ARM64);
+#elif defined(__arm__)
+    jitDebug.SetArch(ARCH_ARM);
+#elif defined(__x86_64__)
+    jitDebug.SetArch(ARCH_X86_64);
+#elif defined(__i386__)
+    jitDebug.SetArch(ARCH_X86);
+#elif defined(__riscv) && defined(__riscv64)
+    jitDebug.SetArch(ARCH_RISCV64);
+#else
+    return false;
+#endif
+
+    std::shared_ptr<DfxElf> jitElf;
+    uint64_t loadBias = 0;
+    if (!jitDebug.FindJitElf(pc, jitElf, loadBias)) {
+        DFXLOGU("TryJitStep: No JIT ELF found for pc: 0x%{public}" PRIx64 "", (uint64_t)pc);
+        return false;
+    }
+
+    if (jitElf == nullptr || !jitElf->IsValid()) {
+        DFXLOGU("TryJitStep: JIT ELF invalid for pc: 0x%{public}" PRIx64 "", (uint64_t)pc);
+        return false;
+    }
+
+    DFXLOGU("TryJitStep: pc=0x%{public}" PRIx64 ", loadBias=0x%{public}" PRIx64 ", hasRuntime=%{public}d, "
+        "runtime=[0x%{public}" PRIx64 ", 0x%{public}" PRIx64 ")",
+        (uint64_t)pc, loadBias, jitElf->HasRuntimeRange(),
+        jitElf->GetRuntimeStart(), jitElf->GetRuntimeEnd());
+
+    UnwindTableInfo uti;
+    std::shared_ptr<DfxMap> tmpMap = std::make_shared<DfxMap>();
+    if (jitElf->HasRuntimeRange()) {
+        tmpMap->begin = 0;
+        tmpMap->end = 0;
+    } else {
+        tmpMap->begin = jitElf->GetStartVaddr() + loadBias;
+        tmpMap->end = jitElf->GetEndVaddr() + loadBias;
+    }
+    tmpMap->offset = 0;
+    tmpMap->name = "[jit]";
+
+    int utiRet = jitElf->FindUnwindTableInfo(pc, tmpMap, uti);
+    if (utiRet != UNW_ERROR_NONE) {
+        DFXLOGU("TryJitStep: Failed to find unwind table in JIT ELF, ret: %{public}d, pc: 0x%{public}" PRIx64 "",
+            utiRet, (uint64_t)pc);
+        return false;
+    }
+
+    std::shared_ptr<RegLocState> rs = std::make_shared<RegLocState>();
+    if (!unwindEntryParser_->Step(pc, uti, rs)) {
+        DFXLOGU("TryJitStep: Failed to step JIT unwind entry, pc: 0x%{public}" PRIx64 "", (uint64_t)pc);
+        return false;
+    }
+
+    bool ret = false;
+    uint16_t jitApplyErrCode = 0;
+    ret = Apply(regs_, rs, jitApplyErrCode);
+    if (ret) {
+        regs_->SetPc(StripPac(regs_->GetPc(), pacMask_));
+        DFXLOGU("TryJitStep: success, new pc: 0x%{public}" PRIx64 "", (uint64_t)regs_->GetPc());
+    } else {
+        DFXLOGU("TryJitStep: Apply failed, pc: 0x%{public}" PRIx64 "", (uint64_t)pc);
+    }
+    return ret;
+}
+
+bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDexPc, uintptr_t origXRefs)
+{
+    DFX_TRACE_SCOPED_DLSYM("StepNterp:%p", reinterpret_cast<void *>(pc));
+#if defined(__aarch64__)
+    // Only handle ARM64 nterp_helper / art_quick_nterp_* frames in libart.so/libartd.so.
+    // Use origSp (the SP before Apply corrupted it) because Apply may have set regs_->sp
+    // to a bad CFA value before returning false. Similarly, use saved x22/x25 because
+    // Apply's Flush may have overwritten them.
+    if (maps_ == nullptr || memory_ == nullptr || regs_ == nullptr) {
+        return false;
+    }
+
+    std::shared_ptr<DfxMap> map;
+    if (memory_->GetMapByPc(pc, map) != UNW_ERROR_NONE || map == nullptr) {
+        return false;
+    }
+
+    // Must be in libart.so / libartd.so. nterp_helper is an ART interpreter
+    // entry that lives in libart.so. Without this guard, a misclassified
+    // frame in some other .so could be wrongly treated as nterp.
+    auto pos = map->name.rfind('/');
+    std::string baseName = (pos == std::string::npos) ? map->name : map->name.substr(pos + 1);
+    if (baseName != "libart.so" && baseName != "libartd.so") {
+        return false;
+    }
+
+    // Identify nterp frames WITHOUT relying on libart.so's symbol table.
+    // nterp_helper is a static (non-exported) symbol, so it is absent from
+    // .dynsym, and release builds of libart.so usually strip .symtab as well.
+    // Symbol-name matching (GetFuncNameAndOffsetByPc) therefore fails on
+    // production libart.so, which breaks the ART-interpreter crossing.
+    //
+    // Two signals can identify an nterp frame, in priority order:
+    //   1) regs_->DexPcSeen(): the DWARF CFI for nterp_helper uses the AOSP16
+    //      DEX1 magic marker (DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop) on
+    //      a register rule (val_expression on x0, reading x22). DfxInstructions
+    //      ::Apply raises this flag whenever the magic fires, independently of
+    //      the evaluated dex_pc value. The DEX1 magic is ONLY emitted by ART's
+    //      CFI for nterp_helper, so the flag alone is proof of an nterp frame
+    //      EVEN WHEN the dex_pc value is 0/unmapped (e.g. the live x22 read by
+    //      the val_expression was clobbered to 0 by intermediate compiled/JNI
+    //      frames before the thread reached a syscall). The previous check
+    //      (DexPc() != 0) conflated "magic fired" with "value non-zero" and
+    //      stopped the unwind at nterp_helper whenever x22 happened to be 0.
+    //      DexPcSeen() survives because it is set BEFORE the CFA flush and
+    //      before Apply may fail on an undefined return-address register.
+    //      This is the most reliable signal when DWARF is present at all.
+    //   2) x22 physical register (origDexPc): the live dex_pc while nterp is
+    //      actively interpreting. Used when there is no DEX1 CFI at all
+    //      (older libart.so) or before any DWARF path has run. This path
+    //      still requires the value to map to a DEX-bearing region, since
+    //      otherwise a non-nterp libart.so frame could be misidentified.
+    //
+    // dex_pc validity only controls the DEX frame injection
+    // (Unwinder::FillInDexFrame semantics). The callee-saves recovery below
+    // always runs once this is identified as an nterp frame; a bogus dex_pc
+    // only suppresses the DEX frame injection — it does not stop the unwind.
+    bool dexPcValid = false;
+    std::string dexMapName;
+    std::shared_ptr<DfxMap> dexMap;
+    uintptr_t effectiveDexPc = regs_->DexPc();
+    if (effectiveDexPc == 0) {
+        effectiveDexPc = origDexPc;
+    }
+    if (effectiveDexPc != 0) {
+        if (maps_->FindMapByAddr(static_cast<uintptr_t>(effectiveDexPc), dexMap) && dexMap != nullptr) {
+            const std::string& n = dexMap->name;
+            dexMapName = n;
+            // Common DEX containers. Use substring match for .vdex because
+            // dex2oat emits transient files like "base.vdex.<hash>.tmp" before
+            // renaming to the canonical "base.vdex", so a strict suffix match
+            // on ".vdex.tmp" would miss the production form.
+            dexPcValid = n.find(".vdex") != std::string::npos ||
+                       EndsWith(n, ".dex") || EndsWith(n, ".apk") ||
+                       StartsWith(n, "[anon:dalvik") ||
+                       // DEX extracted into an anonymous mapping has an empty
+                       // name; require the page to be executable so we don't
+                       // match arbitrary read/write anon regions.
+                       (n.empty() && dexMap->IsMapExec());
+        }
+    }
+    // DEX1 magic fired => definitely an nterp frame (the magic is only
+    // emitted by ART's CFI for nterp_helper), even if the dex_pc value is 0
+    // or unmapped (e.g. live x22 was clobbered to 0 by an intermediate
+    // compiled/JNI frame before the thread reached a syscall). DexPcSeen()
+    // tracks the magic hit independently of the value, so we still enter the
+    // callee-saves recovery and read the saved x22 at [saved_sp+88]. Using
+    // DexPc()!=0 here (the old check) would miss the x22==0 case and stop the
+    // unwind at nterp_helper. Otherwise, fall back to requiring a valid
+    // DEX-mapped dex_pc (the original signal) so we don't misclassify other
+    // libart.so frames (e.g. GC, JIT) as nterp.
+    bool isNterp = regs_->DexPcSeen() || dexPcValid;
+    if (!isNterp) {
+        DFXLOGU("StepNterp: not nterp, pc=0x%{public}" PRIx64 ", dexPc=0x%{public}" PRIx64
+            " (seen=%{public}d, regs:%{public}" PRIx64 ", x22:%{public}" PRIx64 "), dexMap=%{public}s",
+            (uint64_t)pc, (uint64_t)effectiveDexPc, (int)regs_->DexPcSeen(),
+            (uint64_t)regs_->DexPc(), (uint64_t)origDexPc, dexMapName.c_str());
+        return false;
+    }
+    // Consume the DWARF pseudo-register so InjectDexFrameFromDwarf on the next
+    // StepInner iteration does not inject a duplicate DEX frame for the same
+    // dex_pc. We inject it ourselves below.
+    regs_->ClearDexPc();
+
+    DFXLOGU("StepNterp: hit nterp frame, pc=0x%{public}" PRIx64 ", dexPc=0x%{public}" PRIx64
+        " (valid=%{public}d), dexMap=%{public}s, origSp=0x%{public}" PRIx64 "",
+        (uint64_t)pc, (uint64_t)effectiveDexPc, (int)dexPcValid, dexMapName.c_str(), (uint64_t)origSp);
+
+    // ARM64 nterp register allocation (from art/runtime/interpreter/mterp/arm64ng/main.S):
+    //   x22 (xPC)   = interpreted program counter (DEX PC, absolute address in mapped DEX)
+    //   x25 (xREFS) = base of object references of dex registers
+    //
+    // ARM64 nterp callee-saves frame layout (SAVE_ALL_CALLEE_SAVES /
+    // RESTORE_ALL_CALLEE_SAVES in art/runtime/interpreter/mterp/arm64ng/main.S):
+    //   [xREFS - 8]       = saved SP (base of callee-saves area)
+    //   [saved_sp + 0..56] = d8..d15 (FP callee-saves)
+    //   [saved_sp + 64]   = x19 (saved, not restored by nterp)
+    //   [saved_sp + 72]   = x20 (saved, not restored by nterp)
+    //   [saved_sp + 80]   = x21 (saved, not restored by nterp)
+    //   [saved_sp + 88]   = x22 (xPC / DEX PC)   <-- saved DEX PC lives here
+    //   [saved_sp + 96]   = x23
+    //   [saved_sp + 104]  = x24
+    //   [saved_sp + 112]  = x25 (xREFS)
+    //   [saved_sp + 120]  = x26
+    //   [saved_sp + 128]  = x27
+    //   [saved_sp + 136]  = x28
+    //   [saved_sp + 144]  = x29 (FP)
+    //   [saved_sp + 152]  = lr (return address to native caller)
+    //   Spill slots end at +160; the frame size CALLEE_SAVES_SIZE is 176
+    //   (the top 16 bytes are slack):
+    //   caller's SP       = saved_sp + 176
+    //
+    // The live DEX PC lives in register x22 while nterp is actively
+    // interpreting. After nterp_helper calls out into compiled/OAT/JNI
+    // code, the captured x22 can hold a mid-function value of an inner
+    // frame, so the DWARF DEX1 magic can evaluate to a bogus dex_pc. The
+    // real DEX PC was spilled at [saved_sp + 88] before the call-out and is
+    // recovered from there. Inject a virtual DEX frame for the interpreted
+    // Java method, then set regs to the native caller (lr / caller's SP).
+    uintptr_t xRefs = origXRefs; // x25 saved before Apply
+    DFXLOGU("StepNterp: dexPc=0x%{public}" PRIx64 ", x25(xREFS)=0x%{public}" PRIx64 "",
+        (uint64_t)effectiveDexPc, (uint64_t)xRefs);
+
+    // Read saved SP from [xREFS - 8] to locate the callee-saves frame base.
+    uintptr_t savedSp = 0;
+    if (xRefs != 0) {
+        uintptr_t refsAddr = xRefs - 8; // 8: saved SP is at [xREFS - 8]
+        if (!memory_->Read<uintptr_t>(refsAddr, &savedSp, false)) {
+            DFXLOGU("StepNterp: failed to read saved_sp at [xREFS-8]=0x%{public}" PRIx64 "", (uint64_t)refsAddr);
+            return false;
+        }
+    }
+    if (savedSp == 0) {
+        DFXLOGU("StepNterp: saved_sp is 0, cannot locate callee-saves frame");
+        return false;
+    }
+
+    // Read the native return address (lr) from the callee-saves area.
+    uintptr_t nativeLr = 0;
+    uintptr_t lrAddr = savedSp + 152; // 152: offset of lr in callee-saves frame
+    if (!memory_->Read<uintptr_t>(lrAddr, &nativeLr, false)) {
+        DFXLOGU("StepNterp: failed to read native lr at saved_sp+152=0x%{public}" PRIx64 "", (uint64_t)lrAddr);
+        return false;
+    }
+    uintptr_t nativeSp = savedSp + 176; // 176: CALLEE_SAVES_SIZE on ARM64
+
+    // Resolve the DEX PC to inject. Prefer the DWARF DEX1 value when it maps
+    // to a DEX-bearing region. Otherwise (x22 was clobbered by an intermediate
+    // compiled/JNI frame) fall back to the saved x22 in the nterp callee-saves
+    // frame at [saved_sp + 88], which nterp_helper spilled before calling out.
+    // 88: offset of x22 (xPC / DEX PC) in the nterp callee-saves frame.
+    uintptr_t dexPc = effectiveDexPc;
+    if (!dexPcValid) {
+        uintptr_t savedDexPc = 0;
+        uintptr_t savedDexPcAddr = savedSp + 88;
+        if (memory_->Read<uintptr_t>(savedDexPcAddr, &savedDexPc, false) && savedDexPc != 0) {
+            std::shared_ptr<DfxMap> savedDexMap;
+            if (maps_->FindMapByAddr(static_cast<uintptr_t>(savedDexPc), savedDexMap) && savedDexMap != nullptr) {
+                const std::string& sn = savedDexMap->name;
+                bool savedDexPcValid = sn.find(".vdex") != std::string::npos ||
+                    EndsWith(sn, ".dex") || EndsWith(sn, ".apk") ||
+                    StartsWith(sn, "[anon:dalvik") ||
+                    (sn.empty() && savedDexMap->IsMapExec());
+                if (savedDexPcValid) {
+                    dexPc = savedDexPc;
+                    dexMap = savedDexMap;
+                    dexPcValid = true;
+                    DFXLOGU("StepNterp: DEX1 dex_pc=0x%{public}" PRIx64
+                        " unmapped, recovered saved x22=0x%{public}" PRIx64 " from "
+                        "[saved_sp+88]=0x%{public}" PRIx64 ", map=%{public}s",
+                        (uint64_t)effectiveDexPc, (uint64_t)savedDexPc, (uint64_t)savedDexPcAddr, sn.c_str());
+                } else {
+                    DFXLOGU("StepNterp: DEX1 dex_pc=0x%{public}" PRIx64 " unmapped, saved x22=0x%{public}" PRIx64
+                        " maps to non-DEX '%{public}s', skip DEX frame",
+                        (uint64_t)effectiveDexPc, (uint64_t)savedDexPc, sn.c_str());
+                }
+            } else {
+                DFXLOGU("StepNterp: DEX1 dex_pc=0x%{public}" PRIx64 " unmapped, saved x22=0x%{public}" PRIx64
+                    " not in any map, skip DEX frame",
+                    (uint64_t)effectiveDexPc, (uint64_t)savedDexPc);
+            }
+        } else {
+            DFXLOGU("StepNterp: DEX1 dex_pc=0x%{public}" PRIx64
+                " unmapped, failed to read saved x22 at [saved_sp+88]=0x%{public}" PRIx64 ", skip DEX frame",
+                (uint64_t)effectiveDexPc, (uint64_t)savedDexPcAddr);
+        }
+    }
+
+    DFXLOGU("StepNterp: saved_sp=0x%{public}" PRIx64 ", native_lr=0x%{public}" PRIx64
+        ", native_sp=0x%{public}" PRIx64 ", dex_pc=0x%{public}" PRIx64 "",
+        (uint64_t)savedSp, (uint64_t)nativeLr, (uint64_t)nativeSp, (uint64_t)dexPc);
+
+    // Inject a virtual DEX frame for the interpreted Java method (matches AOSP
+    // FillInDexFrame). The DEX frame's PC is the dex_pc (x22), which points into
+    // the mapped DEX file (e.g. inside an .apk/.vdex/.odex mapping). Only inject
+    // when dex_pc actually maps to a DEX-bearing region; otherwise silently
+    // skip (matches AOSP16 libunwindstack FillInDexFrame, which is opportunistic
+    // and never blocks the unwind).
+    if (dexPc != 0 && dexPcValid && dexMap != nullptr) {
+        StepFrame dexFrame;
+        dexFrame.pc = dexPc;
+        dexFrame.sp = nativeSp;
+        dexFrame.fp = 0;
+        dexFrame.frameType = FrameType::DEX_FRAME;
+        AddFrame(dexFrame, dexMap);
+        DFXLOGU("StepNterp: injected DEX frame, pc=0x%{public}" PRIx64 ", map=%{public}s",
+            (uint64_t)dexPc, dexMap->name.c_str());
+    } else if (dexPc != 0) {
+        DFXLOGU("StepNterp: dex_pc=0x%{public}" PRIx64 " not in DEX map, skip DEX frame (continue to native caller)",
+            (uint64_t)dexPc);
+    }
+
+    // Set regs to the native caller so unwinding continues past nterp_helper.
+    if (nativeLr == 0) {
+        DFXLOGU("StepNterp: native_lr is 0, stop unwinding");
+        return false;
+    }
+    regs_->SetPc(StripPac(nativeLr, pacMask_));
+    regs_->SetSp(nativeSp);
+    DFXLOGU("StepNterp: set native pc=0x%{public}" PRIx64 ", sp=0x%{public}" PRIx64
+        "", (uint64_t)nativeLr, (uint64_t)nativeSp);
+    return true;
+#else
+    (void)pc;
+    (void)origSp;
+    (void)origDexPc;
+    (void)origXRefs;
+    return false;
+#endif
+}
+
+void Unwinder::Impl::InjectDexFrameFromDwarf()
+{
+    // AOSP16 libunwindstack-style: when the DWARF CFI for nterp_helper marks
+    // a register with the DEX1 magic (DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop),
+    // DfxInstructions::Apply stores the evaluated value in regs_->DexPc().
+    // We consume it here to inject a virtual DEX frame (FrameType::DEX_FRAME)
+    // whose PC is the dex_pc, pointing into a mapped DEX/vdex/apk/jar file.
+    // This runs at the top of StepInner, BEFORE the current native frame is
+    // added, so the resulting ordering is:
+    //   ... nterp_helper frame | <injected DEX frame> | caller frame ...
+    // (matches libunwindstack Unwinder::Unwind + FillInDexFrame).
+    if (regs_ == nullptr) {
+        return;
+    }
+    uintptr_t dexPc = regs_->DexPc();
+    bool seen = regs_->DexPcSeen();
+    if (dexPc == 0 && !seen) {
+        return;
+    }
+    // Consume the DEX1 signal unconditionally (clears both dex_pc and the
+    // seen flag) so it can never leak past this point and misidentify a later
+    // libart.so frame as nterp. When Apply succeeded on the nterp frame but
+    // the evaluated dex_pc was 0 (live x22 clobbered), there is nothing to
+    // inject here; StepNterp only runs when Apply fails, so in that rare
+    // apply-succeeded-but-dex_pc=0 case the DEX frame is skipped and the
+    // unwind simply continues to the native caller (matches AOSP's
+    // opportunistic FillInDexFrame, which never blocks the unwind).
+    regs_->ClearDexPc();
+    if (dexPc == 0) {
+        DFXLOGU("InjectDexFrame: DEX1 magic seen but dex_pc=0, skip frame (signal consumed)");
+        return;
+    }
+
+    if (maps_ == nullptr) {
+        DFXLOGU("InjectDexFrame: dex_pc=0x%{public}" PRIx64 " but maps_ is null, skip", (uint64_t)dexPc);
+        return;
+    }
+    std::shared_ptr<DfxMap> dexMap;
+    if (!maps_->FindMapByAddr(static_cast<uintptr_t>(dexPc), dexMap) || dexMap == nullptr) {
+        DFXLOGU("InjectDexFrame: dex_pc=0x%{public}" PRIx64 " not in any map, skip", (uint64_t)dexPc);
+        return;
+    }
+    StepFrame dexFrame;
+    dexFrame.pc = dexPc;
+    dexFrame.sp = regs_->GetSp();
+    dexFrame.fp = 0;
+    dexFrame.frameType = FrameType::DEX_FRAME;
+    AddFrame(dexFrame, dexMap);
+    DFXLOGU("InjectDexFrame: injected DEX frame via DWARF DEX1 magic, pc=0x%{public}" PRIx64 ", map=%{public}s",
+        (uint64_t)dexPc, dexMap->name.c_str());
 }
 
 void Unwinder::Impl::FillFrame(DfxFrame& frame, bool needSymParse)
@@ -1434,9 +2253,13 @@ void Unwinder::Impl::FillFrame(DfxFrame& frame, bool needSymParse)
     frame.relPc = frame.map->GetRelPc(frame.pc);
     frame.mapOffset = frame.map->offset;
     if (elf == nullptr) {
+        if (needSymParse) {
+            TryJitSymbolLookup(frame);
+        }
         return;
     }
     frame.buildId = elf->GetBuildId();
+    frame.elfOffset = elf->GetBaseOffset();
     if (needSymParse) {
         ParseFrameSymbol(frame);
     }
@@ -1448,6 +2271,28 @@ void Unwinder::Impl::FillFrame(DfxFrame& frame, bool needSymParse)
     }
     frame.mapName = mapName;
     DFXLOGU("mapName: %{public}s, mapOffset: %{public}" PRIx64 "", frame.mapName.c_str(), frame.mapOffset);
+}
+
+void Unwinder::Impl::FillDexFrame(DfxFrame& frame)
+{
+    // DEX frames are injected by StepNterp to represent interpreted Java methods.
+    // The PC is the dex_pc (x22 register), which points into a mapped DEX file
+    // (e.g. inside an .apk/.vdex/.odex mapping). We must NOT try to load an ELF
+    // from this mapping — just compute rel_pc = pc - map->begin, and set the
+    // map offset so the output shows the correct file offset (matches AOSP
+    // FillInDexFrame behaviour).
+    if (frame.map == nullptr) {
+        frame.relPc = frame.pc;
+        frame.mapName = "Not mapped";
+        DFXLOGU("DEX frame is not mapped, pc=0x%{public}" PRIx64 "", frame.pc);
+        return;
+    }
+    frame.mapName = frame.map->GetElfName();
+    frame.relPc = frame.pc - frame.map->begin;
+    frame.mapOffset = frame.map->offset;
+    DFXLOGU("FillDexFrame: pc=0x%{public}" PRIx64 ", relPc=0x%{public}" PRIx64
+        ", map=%{public}s, offset=0x%{public}" PRIx64,
+        frame.pc, frame.relPc, frame.mapName.c_str(), frame.mapOffset);
 }
 
 void Unwinder::Impl::FillArkwebJsFrame(DfxFrame& frame)

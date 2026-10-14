@@ -184,10 +184,11 @@ bool ElfParser::ParseProgramHeaders(const EhdrType& ehdr)
                 loadInfo.tableVaddr = phdr.p_vaddr;
                 loadInfo.tableSize = static_cast<size_t>(phdr.p_memsz);
                 loadInfo.align = phdr.p_align;
-                if (loadInfo.align == 0) {
-                    continue;
+                if (loadInfo.align != 0) {
+                    loadInfo.mmapLen = CalcMmapLen(loadInfo.tableSize, loadInfo.tableVaddr, loadInfo.align);
+                } else {
+                    loadInfo.mmapLen = loadInfo.tableSize;
                 }
-                loadInfo.mmapLen = CalcMmapLen(loadInfo.tableSize, loadInfo.tableVaddr, loadInfo.align);
                 ptLoads_[phdr.p_offset] = loadInfo;
                 if ((phdr.p_flags & PF_X) == 0) {
                     continue;
@@ -230,7 +231,7 @@ void ElfParser::GetAdltStrTabSectionInfo(uint64_t shOffset, uint64_t shSize)
         DFXLOGE("Get .adlt.strtab failed, offset: 0x%{public}" PRIx64 ", size: 0x%{public}" PRIx64, shOffset, shSize);
     } else {
         adltStrtab_ = std::string(tabBuf.begin(), tabBuf.begin() + shSize);
-        DFXLOGI("Get adlt.strtab success, len: %{public}" PRIuPTR, adltStrtab_.length());
+        DFXLOGU("Get adlt.strtab success, len: %{public}" PRIuPTR, adltStrtab_.length());
     }
 }
 
@@ -817,5 +818,47 @@ bool ElfParser64::GetFuncSymbolByAddr(uint64_t addr, ElfSymbol& elfSymbol)
 {
     return ParseFuncSymbolByAddr<Elf64_Sym>(addr, elfSymbol);
 }
+
+template <typename SymType>
+bool ElfParser::FindSymbolByName(const std::string& name, ElfSymbol& elfSymbol)
+{
+    if (symShdrs_.empty() || mmap_ == nullptr || mmap_->Get() == nullptr) {
+        return false;
+    }
+    for (const auto& shdr : symShdrs_) {
+        ShdrInfo linkShdrInfo;
+        if (!GetSectionInfo(linkShdrInfo, shdr.link)) {
+            continue;
+        }
+        uint32_t count = static_cast<uint32_t>((shdr.entSize != 0) ? (shdr.size / shdr.entSize) : 0);
+        for (uint32_t idx = 0; idx < count; ++idx) {
+            SymType sym;
+            uintptr_t offset = static_cast<uintptr_t>(shdr.offset + idx * shdr.entSize);
+            if (!Read(offset, &sym, sizeof(sym))) {
+                continue;
+            }
+            if (sym.st_shndx == SHN_UNDEF || sym.st_value == 0) {
+                continue;
+            }
+            if (static_cast<uint64_t>(sym.st_name) >= linkShdrInfo.size) {
+                continue;
+            }
+            uintptr_t nameOffset = static_cast<uintptr_t>(linkShdrInfo.offset + sym.st_name);
+            std::string symName(static_cast<char*>(mmap_->Get()) + nameOffset,
+                strnlen(static_cast<char*>(mmap_->Get()) + nameOffset, mmap_->Size() - nameOffset));
+            if (symName == name) {
+                elfSymbol.value = static_cast<uint64_t>(sym.st_value);
+                elfSymbol.size = static_cast<uint64_t>(sym.st_size);
+                elfSymbol.name = static_cast<uint32_t>(sym.st_name);
+                elfSymbol.nameStr = symName;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+template bool ElfParser::FindSymbolByName<Elf32_Sym>(const std::string& name, ElfSymbol& elfSymbol);
+template bool ElfParser::FindSymbolByName<Elf64_Sym>(const std::string& name, ElfSymbol& elfSymbol);
 } // namespace HiviewDFX
 } // namespace OHOS

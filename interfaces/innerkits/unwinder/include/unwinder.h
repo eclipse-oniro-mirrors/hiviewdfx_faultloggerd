@@ -53,6 +53,12 @@ public:
 
     void SetRegs(std::shared_ptr<DfxRegs> regs);
     void SetMaps(std::shared_ptr<DfxMaps> maps);
+    void SetPid(pid_t pid);
+    // Opt-in last-resort stack scan: when a frame has no unwind info, a stale
+    // or no-op LR and an unusable fp chain, scan the stack above sp for a
+    // plausible saved return address (executable mapping, aligned). Default
+    // off; scanned frames are best-effort guesses.
+    void SetEnableScanStep(bool enable);
     const std::shared_ptr<DfxRegs>& GetRegs() const;
 
     const std::shared_ptr<DfxMaps>& GetMaps() const;

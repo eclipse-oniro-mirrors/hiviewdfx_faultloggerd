@@ -53,14 +53,17 @@ private:
 
 class CompressHapElfFactory : public ElfFactory {
 public:
-    explicit CompressHapElfFactory(std::string filePath, std::shared_ptr<DfxMap> prevMap)
-        : filePath_(std::move(filePath)), prevMap_(prevMap) {}
+    explicit CompressHapElfFactory(std::string filePath, std::shared_ptr<DfxMap> prevMap,
+                                   uint64_t curOffset = 0, uint64_t curSize = 0)
+        : filePath_(std::move(filePath)), prevMap_(prevMap), curOffset_(curOffset), curSize_(curSize) {}
     ~CompressHapElfFactory() override = default;
     std::shared_ptr<DfxElf> Create() override;
 private:
-    bool VerifyElf(int fd, size_t& elfSize);
+    std::shared_ptr<DfxElf> LoadEmbeddedElf(int fd, uint64_t offset, uint64_t size);
     const std::string filePath_;
     std::shared_ptr<DfxMap> prevMap_;
+    uint64_t curOffset_ = 0;
+    uint64_t curSize_ = 0;
 };
 
 class VdsoElfFactory : public ElfFactory {

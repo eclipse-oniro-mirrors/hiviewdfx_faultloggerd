@@ -61,6 +61,7 @@ enum class FrameType: uint8_t {
     STATIC_JS_FRAME = 2,
     JSVM_FRAME = 3,
     ARKWEB_JS_FRAME = 4,
+    DEX_FRAME = 5,
 };
 /**
  * @brief Native Frame struct
@@ -83,6 +84,8 @@ struct DfxFrame {
     uint64_t fp {0};
     /** map offset */
     uint64_t mapOffset {0};
+    /** embedded elf start offset in the container file (apk/hap), 0 for standalone so */
+    uint64_t elfOffset {0};
     /** function byte offset */
     uint64_t funcOffset {0};
     /** elf file name */

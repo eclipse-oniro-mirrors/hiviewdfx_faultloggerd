@@ -28,6 +28,7 @@ static const std::string NOTE_GNU_BUILD_ID = ".note.gnu.build-id";
 static const std::string NOTES = ".notes";
 static const std::string GNU_DEBUGDATA = ".gnu_debugdata";
 static const std::string EH_FRAME_HDR = ".eh_frame_hdr";
+static const std::string DEBUG_FRAME = ".debug_frame";
 static const std::string EH_FRAME = ".eh_frame";
 static const std::string ARM_EXIDX = ".ARM.exidx";
 static const std::string ARM_EXTAB = ".ARM.extab";

@@ -31,6 +31,13 @@ class DwarfEntryParser : public UnwindEntryParser {
 public:
     explicit DwarfEntryParser(const std::shared_ptr<DfxMemory>& memory) : UnwindEntryParser(memory) {}
     ~DwarfEntryParser() override = default;
+    void SetDebugFrameMode(bool isDebugFrame, uintptr_t entriesOffset)
+    {
+        isDebugFrame_ = isDebugFrame;
+        entriesOffset_ = entriesOffset;
+        cie32Value_ = isDebugFrame ? static_cast<uint32_t>(-1) : 0;
+        cie64Value_ = isDebugFrame ? static_cast<uint64_t>(-1) : 0;
+    }
     bool Step(uintptr_t pc, const UnwindTableInfo& uti, std::shared_ptr<RegLocState> rs) override;
 protected:
     bool SearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei) override;
@@ -43,6 +50,8 @@ private:
     bool FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo);
     bool FillInCie(uintptr_t ptr, CommonInfoEntry& cieInfo);
     void ParseAugData(uintptr_t& ptr, CommonInfoEntry& cieInfo, const std::vector<char>& augStr);
+    bool isDebugFrame_ = false;
+    uintptr_t entriesOffset_ = 0;
     uint32_t cie32Value_ = 0;
     uint64_t cie64Value_ = 0;
     std::unordered_map<uintptr_t, FrameDescEntry> fdeEntries_;

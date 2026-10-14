@@ -33,7 +33,13 @@ public:
     static bool Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, RegLocState& rsState, uint16_t& errCode);
 
 private:
-    static bool Flush(DfxRegs& dfxRegs, std::shared_ptr<DfxMemory> memory, uintptr_t cfa, RegLoc loc, uintptr_t& val);
+    // Flush evaluates a single RegLoc and writes the result to val.
+    // When the RegLoc is a DWARF expression that contains the AOSP16 DEX1
+    // magic marker, is_dex_pc is set to true and the caller (Apply) should
+    // store val into the dex_pc pseudo-register instead of the normal
+    // register slot. Returns false on memory/eval failure.
+    static bool Flush(DfxRegs& dfxRegs, std::shared_ptr<DfxMemory> memory, uintptr_t cfa, RegLoc loc,
+                      uintptr_t& val, bool& is_dex_pc);
     static bool GetCfa(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, RegLocState& rsState,
                        uintptr_t& cfa, uint16_t& errCode);
 };

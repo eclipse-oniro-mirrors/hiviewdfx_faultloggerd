@@ -29,6 +29,7 @@ namespace OHOS {
 namespace HiviewDFX {
 class DfxMap;
 class DfxMaps;
+class DfxMmap;
 class DfxRegs;
 
 struct UnwindTableInfo {
@@ -37,10 +38,14 @@ struct UnwindTableInfo {
     uintptr_t gp = 0; /* global-pointer in effect for this entry */
     int format = -1;
     bool isLinear = false;
+    bool isDebugFrame = false;
     uintptr_t namePtr = 0;
     uintptr_t segbase = 0;
     uintptr_t tableLen = 0;
     uintptr_t tableData = 0;
+    std::shared_ptr<DfxMmap> debugFrameMmap = nullptr;
+    uintptr_t debugFrameEnd = 0;
+    uintptr_t oatExecutableOffset = 0;
 };
 
 struct UnwindEntryInfo {

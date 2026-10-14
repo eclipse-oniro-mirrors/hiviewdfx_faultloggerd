@@ -1,0 +1,160 @@
+diff --git a/interfaces/innerkits/unwinder/include/dfx_jit_debug.h b/interfaces/innerkits/unwinder/include/dfx_jit_debug.h
+index 5a3aca85..eb6e40c6 100644
+--- a/interfaces/innerkits/unwinder/include/dfx_jit_debug.h
++++ b/interfaces/innerkits/unwinder/include/dfx_jit_debug.h
+@@ -79,7 +79,11 @@ struct JitSymbolInfo {
+ 
+ class DfxJitDebug {
+ public:
+-    static DfxJitDebug& Instance();
++    // Owned per Unwinder (one DfxJitDebug per unwind session): the cached
++    // descriptor and elf entries are bound to that session's target pid, so a
++    // process-global instance would leak state across pids.
++    DfxJitDebug() = default;
++    ~DfxJitDebug() = default;
+     void SetMemory(const std::shared_ptr<DfxMemory>& memory);
+     void SetMaps(const std::shared_ptr<DfxMaps>& maps);
+     void SetPid(pid_t pid);
+@@ -92,8 +96,6 @@ public:
+     void Clear();
+ 
+ private:
+-    DfxJitDebug() = default;
+-    ~DfxJitDebug() = default;
+     DfxJitDebug(const DfxJitDebug&) = delete;
+     DfxJitDebug& operator=(const DfxJitDebug&) = delete;
+ 
+diff --git a/interfaces/innerkits/unwinder/src/elf/dfx_jit_debug.cpp b/interfaces/innerkits/unwinder/src/elf/dfx_jit_debug.cpp
+index fa9b5786..16bcebb4 100644
+--- a/interfaces/innerkits/unwinder/src/elf/dfx_jit_debug.cpp
++++ b/interfaces/innerkits/unwinder/src/elf/dfx_jit_debug.cpp
+@@ -77,12 +77,6 @@ bool IsBlankMap(const std::shared_ptr<DfxMap>& map)
+ }
+ } // anonymous namespace
+ 
+-DfxJitDebug& DfxJitDebug::Instance()
+-{
+-    static DfxJitDebug instance;
+-    return instance;
+-}
+-
+ void DfxJitDebug::SetMemory(const std::shared_ptr<DfxMemory>& memory)
+ {
+     memory_ = memory;
+diff --git a/interfaces/innerkits/unwinder/unwinder.cpp b/interfaces/innerkits/unwinder/unwinder.cpp
+index 5a0868ba..5964bdfb 100644
+--- a/interfaces/innerkits/unwinder/unwinder.cpp
++++ b/interfaces/innerkits/unwinder/unwinder.cpp
+@@ -220,8 +220,11 @@ public:
+ 
+     inline void SetPid(pid_t pid)
+     {
+-        if (pid > 0) {
++        // Reusing one Unwinder for another pid must not keep the previous
++        // pid's JIT descriptor/entries cache.
++        if (pid > 0 && pid != pid_) {
+             pid_ = pid;
++            jitDebug_.Clear();
+         }
+     }
+ 
+@@ -415,6 +418,7 @@ private:
+     std::shared_ptr<UnwindEntryParser> exidxEntryParser_ = nullptr;
+     std::shared_ptr<DfxRegs> regs_ = nullptr;
+     std::shared_ptr<DfxMaps> maps_ = nullptr;
++    DfxJitDebug jitDebug_ {};
+     std::vector<uintptr_t> pcs_ {};
+     std::vector<DfxFrame> frames_ {};
+     UnwindErrorData lastErrorData_ {};
+@@ -1795,7 +1799,7 @@ void Unwinder::Impl::TryJitSymbolLookup(DfxFrame& frame)
+     if (frame.map != nullptr && IsFileBackedMapName(frame.map->name)) {
+         return;
+     }
+-    auto& jitDebug = DfxJitDebug::Instance();
++    auto& jitDebug = jitDebug_;
+     jitDebug.SetMemory(memory_);
+     jitDebug.SetMaps(maps_);
+     jitDebug.SetPid(pid_);
+@@ -1858,7 +1862,7 @@ bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
+         }
+     }
+ 
+-    auto& jitDebug = DfxJitDebug::Instance();
++    auto& jitDebug = jitDebug_;
+     jitDebug.SetMemory(memory_);
+     jitDebug.SetMaps(maps_);
+     jitDebug.SetPid(pid_);
+diff --git a/test/unittest/unwind/jit_debug_test.cpp b/test/unittest/unwind/jit_debug_test.cpp
+index 8049ac53..8f4a9afc 100644
+--- a/test/unittest/unwind/jit_debug_test.cpp
++++ b/test/unittest/unwind/jit_debug_test.cpp
+@@ -29,7 +29,7 @@ class DfxJitDebugTest : public testing::Test {};
+ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest001, TestSize.Level1)
+ {
+     GTEST_LOG_(INFO) << "DfxJitDebugTest001: start.";
+-    auto& jitDebug = DfxJitDebug::Instance();
++    DfxJitDebug jitDebug;
+     jitDebug.Clear();
+     EXPECT_FALSE(jitDebug.HasJitDebugInfo());
+     GTEST_LOG_(INFO) << "DfxJitDebugTest001: end.";
+@@ -38,7 +38,7 @@ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest001, TestSize.Level1)
+ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest002, TestSize.Level1)
+ {
+     GTEST_LOG_(INFO) << "DfxJitDebugTest002: start.";
+-    auto& jitDebug = DfxJitDebug::Instance();
++    DfxJitDebug jitDebug;
+     jitDebug.Clear();
+     
+     auto maps = DfxMaps::Create();
+@@ -59,7 +59,7 @@ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest002, TestSize.Level1)
+ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest003, TestSize.Level1)
+ {
+     GTEST_LOG_(INFO) << "DfxJitDebugTest003: start.";
+-    auto& jitDebug = DfxJitDebug::Instance();
++    DfxJitDebug jitDebug;
+     jitDebug.Clear();
+     
+     auto maps = DfxMaps::Create();
+@@ -82,7 +82,7 @@ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest003, TestSize.Level1)
+ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest004, TestSize.Level1)
+ {
+     GTEST_LOG_(INFO) << "DfxJitDebugTest004: test ForEachJitElf with nullptr callback.";
+-    auto& jitDebug = DfxJitDebug::Instance();
++    DfxJitDebug jitDebug;
+     jitDebug.Clear();
+     
+     bool result = jitDebug.ForEachJitElf(0, nullptr);
+@@ -92,18 +92,20 @@ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest004, TestSize.Level1)
+ 
+ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest005, TestSize.Level1)
+ {
+-    GTEST_LOG_(INFO) << "DfxJitDebugTest005: test Instance returns the same singleton and Clear resets state.";
+-    auto& jitDebug = DfxJitDebug::Instance();
++    GTEST_LOG_(INFO) << "DfxJitDebugTest005: test instances are independent and Clear resets state.";
++    DfxJitDebug jitDebug;
++    DfxJitDebug other;
+     jitDebug.Clear();
+-    EXPECT_EQ(&jitDebug, &DfxJitDebug::Instance());
++    EXPECT_NE(&jitDebug, &other);
+     EXPECT_FALSE(jitDebug.HasJitDebugInfo());
++    EXPECT_FALSE(other.HasJitDebugInfo());
+     GTEST_LOG_(INFO) << "DfxJitDebugTest005: end.";
+ }
+ 
+ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest006, TestSize.Level1)
+ {
+     GTEST_LOG_(INFO) << "DfxJitDebugTest006: test FindJitElf returns false with null inputs.";
+-    auto& jitDebug = DfxJitDebug::Instance();
++    DfxJitDebug jitDebug;
+     jitDebug.Clear();
+     
+     std::shared_ptr<DfxElf> elf;
+@@ -116,7 +118,7 @@ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest006, TestSize.Level1)
+ HWTEST_F(DfxJitDebugTest, DfxJitDebugTest007, TestSize.Level1)
+ {
+     GTEST_LOG_(INFO) << "DfxJitDebugTest007: test GetJitSymbolInfo returns false with zero pc.";
+-    auto& jitDebug = DfxJitDebug::Instance();
++    DfxJitDebug jitDebug;
+     jitDebug.Clear();
+     
+     JitSymbolInfo info;

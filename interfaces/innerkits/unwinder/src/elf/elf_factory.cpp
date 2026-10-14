@@ -130,7 +130,7 @@ std::shared_ptr<DfxElf> RegularElfFactory::Create()
         DFXLOGE("file path is empty!");
         return regularElf;
     }
-    DFXLOGU("file: %{public}s", filePath_.c_str());
+    DFXLOGU("file: %{public}s %{public}zu", filePath_.c_str(), filePath_.size());
 #if defined(is_ohos) && is_ohos
     if (!DfxMaps::IsLegalMapItem(filePath_)) {
         DFXLOGD("Illegal map file, please check file: %{public}s", filePath_.c_str());
@@ -195,18 +195,23 @@ std::shared_ptr<DfxElf> VdsoElfFactory::Create()
 std::shared_ptr<DfxElf> CompressHapElfFactory::Create()
 {
     /*
-      elf header is in the first mmap area
-      c3840000-c38a6000 r--p 00174000 /data/storage/el1/bundle/entry.hap <- program header
-      c38a6000-c3945000 r-xp 001d9000 /data/storage/el1/bundle/entry.hap <- pc is in this region
-      c3945000-c394b000 r--p 00277000 /data/storage/el1/bundle/entry.hap
-      c394b000-c394c000 rw-p 0027c000 /data/storage/el1/bundle/entry.hap
+      Two layouts for an elf embedded in a package file:
+      1) apk: the .so's ELF header lives at the current (r-xp) map's own offset
+         5fa116d000-5fa72f5000 r-xp 00aa3000 /system/app/X/X.apk  <- pc here, ELF header at offset
+      2) hap: the ELF header lives in the preceding read-only map
+         c3840000-c38a6000 r--p 00174000 /data/storage/.../entry.hap <- program header (prev)
+         c38a6000-c3945000 r-xp 001d9000 /data/storage/.../entry.hap <- pc here
+      Try the current map's own offset first, then fall back to the previous
+      read-only map's offset (mirrors libunwindstack MapInfo::CreateFileMemory).
     */
-    if (prevMap_ == nullptr) {
-        DFXLOGE("current hap map item or prev map item , maybe pc is wrong?");
+    if (prevMap_ == nullptr && curOffset_ == 0) {
+        DFXLOGE("no offset available for embedded elf, file: %{public}s", filePath_.c_str());
         return nullptr;
     }
     // Do not use the Realpath function, the sandbox path Realpath function will return failure
-    if (filePath_.find(SANDBOX_FILE_PATH_PREFIX) == std::string::npos || !EndsWith(filePath_, ".hap")) {
+    bool isHap = EndsWith(filePath_, ".hap");
+    bool isApk = EndsWith(filePath_, ".apk");
+    if ((isHap && filePath_.find(SANDBOX_FILE_PATH_PREFIX) == std::string::npos) || (!isHap && !isApk)) {
         DFXLOGD("Illegal file path, please check file: %{public}s", filePath_.c_str());
         return nullptr;
     }
@@ -216,79 +221,88 @@ std::shared_ptr<DfxElf> CompressHapElfFactory::Create()
         return nullptr;
     }
 
-    size_t elfSize = 0;
-    if (!VerifyElf(smartFd.GetFd(), elfSize)) {
-        return {};
+    // 1) apk: .so ELF header typically at the current map's own offset.
+    if (curOffset_ != 0) {
+        auto elf = LoadEmbeddedElf(smartFd.GetFd(), curOffset_, curSize_);
+        if (elf != nullptr) {
+            return elf;
+        }
     }
-    DFXLOGU("elfSize: %{public}zu", elfSize);
-    constexpr size_t maxElfSize = 1024 * 1024 * 1024; // 1GB common size limit for HAP embedded ELF
-    if (elfSize > maxElfSize) {
-        DFXLOGE("elf size too large: %{public}zu", elfSize);
-        return {};
+    // 2) hap / fallback: ELF header in the preceding read-only map.
+    if (prevMap_ != nullptr) {
+        auto elf = LoadEmbeddedElf(smartFd.GetFd(), prevMap_->offset, prevMap_->end - prevMap_->begin);
+        if (elf != nullptr) {
+            return elf;
+        }
     }
-    auto mMap = std::make_shared<DfxMmap>();
-    if (!mMap->Init(smartFd.GetFd(), elfSize, prevMap_->offset)) {
-        DFXLOGE("Failed to init mmap_!");
-        return {};
-    }
-    std::shared_ptr<DfxElf> compressHapElf = std::make_shared<DfxElf>(mMap);
-    compressHapElf->SetBaseOffset(prevMap_->offset);
-    if (!compressHapElf->IsValid()) {
-        DFXLOGE("Failed to parse compress hap Elf.");
-        return {};
-    }
-    return compressHapElf;
+    return {};
 }
 
-bool CompressHapElfFactory::VerifyElf(int fd, size_t& elfSize)
+std::shared_ptr<DfxElf> CompressHapElfFactory::LoadEmbeddedElf(int fd, uint64_t offset, uint64_t size)
 {
-    size_t size = prevMap_->end - prevMap_->begin;
+    size_t mapSize = std::max<uint64_t>(size, sizeof(Elf64_Ehdr));
     auto mmap = std::make_shared<DfxMmap>();
-    if (!mmap->Init(fd, size, static_cast<off_t>(prevMap_->offset))) {
-        DFXLOGE("Failed to mmap program header in hap.");
-        return false;
+    if (!mmap->Init(fd, mapSize, static_cast<off_t>(offset))) {
+        DFXLOGE("Failed to mmap header at offset 0x%{public}" PRIx64, offset);
+        return nullptr;
     }
     const uint8_t* data = static_cast<const uint8_t*>(mmap->Get());
     if (data == nullptr || memcmp(data, ELFMAG, SELFMAG) != 0) {
-        DFXLOGE("Invalid elf hdr?");
-        return false;
+        // Not an ELF header at this offset, caller will try the next candidate.
+        return nullptr;
     }
     uint8_t classType = data[EI_CLASS];
-    elfSize = 0;
+    size_t elfSize = 0;
     uint64_t elfSizeRaw = 0;
     if (classType == ELFCLASS32) {
         const Elf32_Ehdr* ehdr = reinterpret_cast<const Elf32_Ehdr *>(data);
         uint64_t sectionSize = static_cast<uint64_t>(ehdr->e_shentsize) * ehdr->e_shnum;
         if (__builtin_add_overflow(static_cast<uint64_t>(ehdr->e_shoff), sectionSize, &elfSizeRaw)) {
             DFXLOGE("elf size overflow");
-            return false;
+            return nullptr;
         }
     } else if (classType == ELFCLASS64) {
         const Elf64_Ehdr* ehdr = reinterpret_cast<const Elf64_Ehdr *>(data);
         uint64_t sectionSize = static_cast<uint64_t>(ehdr->e_shentsize) * ehdr->e_shnum;
         if (__builtin_add_overflow(static_cast<uint64_t>(ehdr->e_shoff), sectionSize, &elfSizeRaw)) {
             DFXLOGE("elf size overflow");
-            return false;
+            return nullptr;
         }
     }
     elfSize = static_cast<size_t>(elfSizeRaw);
     if (elfSize == 0) {
-        DFXLOGE("elf size equal zero, invalid elf!");
-        return false;
+        DFXLOGE("elf size equal zero, invalid elf at offset 0x%{public}" PRIx64, offset);
+        return nullptr;
+    }
+    constexpr size_t maxElfSize = 1024 * 1024 * 1024; // 1GB common size limit for embedded ELF
+    if (elfSize > maxElfSize) {
+        DFXLOGE("elf size too large: %{public}zu", elfSize);
+        return nullptr;
     }
     auto fileSize = GetFileSize(fd);
     if (fileSize <= 0) {
         DFXLOGE("file size can not less or equal zero!");
-        return false;
+        return nullptr;
     }
     uint64_t totalSize = 0;
-    if (__builtin_add_overflow(static_cast<uint64_t>(elfSize), static_cast<uint64_t>(prevMap_->offset),
-        &totalSize) || totalSize > static_cast<uint64_t>(fileSize)) {
-        DFXLOGE("Invalid elf size? elf size: %{public}zu, hap size: %{public}zu", elfSize,
-            static_cast<size_t>(fileSize));
-        return false;
+    if (__builtin_add_overflow(static_cast<uint64_t>(elfSize), offset, &totalSize) ||
+        totalSize > static_cast<uint64_t>(fileSize)) {
+        DFXLOGE("Invalid elf size? elf size: %{public}zu, file size: %{public}zu, offset: 0x%{public}" PRIx64,
+            elfSize, static_cast<size_t>(fileSize), offset);
+        return nullptr;
     }
-    return true;
+    auto mMap = std::make_shared<DfxMmap>();
+    if (!mMap->Init(fd, elfSize, static_cast<off_t>(offset))) {
+        DFXLOGE("Failed to init mmap_ at offset 0x%{public}" PRIx64, offset);
+        return nullptr;
+    }
+    std::shared_ptr<DfxElf> elf = std::make_shared<DfxElf>(mMap);
+    elf->SetBaseOffset(offset);
+    if (!elf->IsValid()) {
+        DFXLOGE("Failed to parse embedded elf at offset 0x%{public}" PRIx64, offset);
+        return nullptr;
+    }
+    return elf;
 }
 } // namespace HiviewDFX
 } // namespace OHOS

@@ -38,8 +38,13 @@ public:
     ~DfxElf() { Clear(); }
 
     void SetMmap(const std::shared_ptr<DfxMmap>& mmap) { mmap_ = mmap; }
+    std::shared_ptr<DfxMmap> GetMmap() { return mmap_; }
     bool IsValid();
     uint8_t GetClassType();
+    // ELF32/EM_ARM image, i.e. an arm32 guest library of a translated process
+    // (on native arm32 targets every library qualifies). Such ELFs carry
+    // .ARM.exidx unwind tables instead of .eh_frame.
+    bool IsArm32Elf();
     ArchType GetArchType();
     uint64_t GetElfSize();
     std::string GetElfName();
@@ -55,6 +60,15 @@ public:
     uint64_t GetEndPc();
     uint64_t GetStartVaddr();
     uint64_t GetEndVaddr();
+    bool IsValidPc(uint64_t pc);
+    void SetRuntimeRange(uint64_t start, uint64_t end)
+    {
+        runtimeStart_ = start;
+        runtimeEnd_ = end;
+    }
+    uint64_t GetRuntimeStart() const { return runtimeStart_; }
+    uint64_t GetRuntimeEnd() const { return runtimeEnd_; }
+    bool HasRuntimeRange() const { return runtimeStart_ != static_cast<uint64_t>(-1) && runtimeEnd_ != 0; }
     void SetBaseOffset(uint64_t offset);
     uint64_t GetBaseOffset();
     uint64_t GetStartOffset();
@@ -74,6 +88,8 @@ public:
     const std::string& GetAdltStrtab() const;
     std::string GetAdltOriginSoNameByRelPc(uint64_t relPc) const;
     bool FindFuncSymbolByName(std::string funcName, ElfSymbol& elfSymbol);
+    bool FindGlobalVariableByName(const std::string& name, ElfSymbol& elfSymbol);
+    uintptr_t GetOatExecutableOffset(std::shared_ptr<DfxMap> map, std::shared_ptr<DfxMmap> mmap);
 
 protected:
     void Init();
@@ -101,11 +117,14 @@ protected:
 private:
     bool valid_ = false;
     uint8_t classType_ = 0;
+    uint16_t elfMachine_ = 0;
     int64_t loadBias_ = 0;
     uint64_t loadBase_ = static_cast<uint64_t>(-1);
     uint64_t startPc_ = static_cast<uint64_t>(-1);
     uint64_t endPc_ = 0;
     uint64_t baseOffset_ = 0; // use for so in hap
+    uint64_t runtimeStart_ = static_cast<uint64_t>(-1);
+    uint64_t runtimeEnd_ = 0;
     std::string buildId_ = "";
     struct UnwindTableInfo uti_;
     bool hasTableInfo_ = false;

@@ -30,8 +30,18 @@ std::shared_ptr<ElfFactory> ElfFactorySelector::Select(DfxMap& map, pid_t pid)
 {
     std::shared_ptr<ElfFactory> elfFactory = nullptr;
     if (map.name.find(SANDBOX_FILE_PATH_PREFIX) != std::string::npos && EndsWith(map.name, ".hap")) {
-        elfFactory = std::make_shared<CompressHapElfFactory>(map.name, map.prevMap);
+        uint64_t curOffset = map.offset;
+        uint64_t curSize = map.end - map.begin;
         map.offset -= map.prevMap->offset;
+        elfFactory = std::make_shared<CompressHapElfFactory>(map.name, map.prevMap, curOffset, curSize);
+    } else if (EndsWith(map.name, ".apk")) {
+        // For an uncompressed, page-aligned .so inside an apk, the r-xp map's own
+        // offset is the .so start (= elf_start_offset). Align with libunwindstack:
+        // elf_offset = offset - elf_start_offset = 0, so GetRelPc yields a pc
+        // relative to the .so (same as debuggerd), not the apk file offset.
+        uint64_t soStart = map.offset;
+        elfFactory = std::make_shared<CompressHapElfFactory>(map.name, map.prevMap, soStart, map.end - map.begin);
+        map.offset -= soStart;
     } else if (map.IsVdsoMap()) {
         elfFactory = std::make_shared<VdsoElfFactory>(map.begin, map.end - map.begin, pid);
     } else {

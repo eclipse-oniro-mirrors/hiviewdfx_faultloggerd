@@ -17,8 +17,10 @@
 
 #include <algorithm>
 #include <fcntl.h>
+#include <securec.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 #include "dfx_define.h"
 #include "dfx_errors.h"
 #include "dfx_log.h"
@@ -26,6 +28,7 @@
 #include "dfx_trace_dlsym.h"
 #include "dfx_elf.h"
 #include "dfx_maps.h"
+#include "dfx_util.h"
 
 namespace OHOS {
 namespace HiviewDFX {
@@ -38,6 +41,8 @@ namespace {
 static const int FOUR_BYTES = 4;
 static const int EIGHT_BYTES = 8;
 static const int THIRTY_TWO_BITS = 32;
+constexpr size_t DEFAULT_PAGE_SIZE = 4096; // 4096 : fallback when sysconf fails
+constexpr size_t PAGE_CACHE_SLOTS = 8; // 8 : direct-mapped page cache slots
 }
 
 bool DfxAccessors::GetMapByPcAndCtx(uintptr_t pc, std::shared_ptr<DfxMap>& map, void *arg)
@@ -186,6 +191,73 @@ int DfxAccessorsRemote::AccessMem(uintptr_t addr, uintptr_t *val, void *arg)
         }
     }
 
+    if (method_ != ReadMethod::READ_METHOD_PTRACE_PEEK) {
+        if (ReadByVmReadv(addr, val, ctx->pid)) {
+            if (method_ == ReadMethod::READ_METHOD_UNDECIDED) {
+                method_ = ReadMethod::READ_METHOD_VM_READV;
+                DFXLOGU("AccessMem use process_vm_readv, pid: %{public}d", ctx->pid);
+            }
+            return UNW_ERROR_NONE;
+        }
+        if (method_ == ReadMethod::READ_METHOD_VM_READV) {
+            return UNW_ERROR_ILLEGAL_VALUE;
+        }
+    }
+
+    if (ReadByPtrace(addr, val, ctx->pid)) {
+        if (method_ == ReadMethod::READ_METHOD_UNDECIDED) {
+            method_ = ReadMethod::READ_METHOD_PTRACE_PEEK;
+            DFXLOGU("AccessMem fall back to ptrace peek, pid: %{public}d", ctx->pid);
+        }
+        return UNW_ERROR_NONE;
+    }
+    return UNW_ERROR_ILLEGAL_VALUE;
+}
+
+bool DfxAccessorsRemote::ReadByVmReadv(uintptr_t addr, uintptr_t *val, pid_t pid)
+{
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    if (pageSize_ == 0) {
+        long pageSize = sysconf(_SC_PAGESIZE);
+        pageSize_ = (pageSize > 0) ? static_cast<size_t>(pageSize) : DEFAULT_PAGE_SIZE;
+        pageCache_.resize(PAGE_CACHE_SLOTS);
+        for (auto &slot : pageCache_) {
+            slot.data.resize(pageSize_);
+        }
+    }
+
+    size_t offset = static_cast<size_t>(addr & (pageSize_ - 1));
+    if (offset + sizeof(uintptr_t) > pageSize_) {
+        // Unaligned access crossing the page tail: one direct read, no caching.
+        return ReadProcMemByPid(pid, addr, val, sizeof(uintptr_t)) == sizeof(uintptr_t);
+    }
+
+    uintptr_t pageBase = addr & ~(static_cast<uintptr_t>(pageSize_ - 1));
+    size_t slotIdx = static_cast<size_t>((pageBase / pageSize_) % PAGE_CACHE_SLOTS);
+    PageSlot &slot = pageCache_[slotIdx];
+    if (slot.base != pageBase || slot.validLen < offset + sizeof(uintptr_t)) {
+        // Prefetch the whole page in one process_vm_readv based call. Transfers
+        // are all-or-nothing per iovec, so a page with an unmapped tail fails
+        // as a whole; retry just the requested word (no caching) to keep the
+        // failure granularity identical to a single PEEKDATA.
+        size_t bytes = ReadProcMemByPid(pid, pageBase, slot.data.data(), pageSize_);
+        if (bytes < offset + sizeof(uintptr_t)) {
+            slot.base = 0;
+            slot.validLen = 0;
+            bool ok = ReadProcMemByPid(pid, addr, val, sizeof(uintptr_t)) == sizeof(uintptr_t);
+            return ok;
+        }
+        slot.base = pageBase;
+        slot.validLen = bytes;
+    }
+    if (memcpy_s(val, sizeof(uintptr_t), slot.data.data() + offset, sizeof(uintptr_t)) != EOK) {
+        return false;
+    }
+    return true;
+}
+
+bool DfxAccessorsRemote::ReadByPtrace(uintptr_t addr, uintptr_t *val, pid_t pid)
+{
     int end;
     if (sizeof(long) == FOUR_BYTES && sizeof(uintptr_t) == EIGHT_BYTES) {
         end = 2; // 2 : read two times
@@ -198,7 +270,7 @@ int DfxAccessorsRemote::AccessMem(uintptr_t addr, uintptr_t *val, void *arg)
         uintptr_t tmpAddr = ((i == 0) ? addr : addr + FOUR_BYTES);
         errno = 0;
 
-        tmpVal = (unsigned long) ptrace(PTRACE_PEEKDATA, ctx->pid, tmpAddr, nullptr);
+        tmpVal = (unsigned long) ptrace(PTRACE_PEEKDATA, pid, tmpAddr, nullptr);
         if (i == 0) {
             *val = 0;
         }
@@ -210,10 +282,10 @@ int DfxAccessorsRemote::AccessMem(uintptr_t addr, uintptr_t *val, void *arg)
 #endif
         if (errno) {
             DFXLOGU("errno: %{public}d", errno);
-            return UNW_ERROR_ILLEGAL_VALUE;
+            return false;
         }
     }
-    return UNW_ERROR_NONE;
+    return true;
 }
 
 int DfxAccessorsRemote::AccessReg(int reg, uintptr_t *val, void *arg)

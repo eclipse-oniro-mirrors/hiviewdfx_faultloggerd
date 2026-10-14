@@ -50,6 +50,7 @@ if (defined(ohos_lite)) {
       "$faultloggerd_path/interfaces/innerkits/signal_handler",
       "$faultloggerd_path/tools/process_dump",
       "$faultloggerd_path/tools/process_dump/utils",
+      "$faultloggerd_interfaces_path/innerkits/unwinder/include",
     ]
   }
 
@@ -98,6 +99,7 @@ if (defined(ohos_lite)) {
         "$faultloggerd_path/interfaces/innerkits/dump_catcher:libdfx_dumpcatcher",
         "$faultloggerd_path/interfaces/innerkits/formatter:libjson_stack_formatter",
         "$faultloggerd_path/interfaces/innerkits/procinfo:libdfx_procinfo",
+        "$faultloggerd_interfaces_path/innerkits/unwinder:libunwinder",
       ]
 
       external_deps = [

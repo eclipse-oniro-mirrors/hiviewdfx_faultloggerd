@@ -305,6 +305,9 @@ bool DfxMaps::IsLegalMapItem(const std::string& name, bool withArk)
     if (withArk && (IsArkHapMapItem(name) || IsArkCodeMapItem(name))) {
         return true;
     }
+    if (name.find("/memfd:") != std::string::npos) {
+        return true;
+    }
     if (EndsWith(name, "[vdso]") || EndsWith(name, "[shmm]")) {
         return true;
     }

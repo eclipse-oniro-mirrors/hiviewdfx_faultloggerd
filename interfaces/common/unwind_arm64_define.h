@@ -70,12 +70,30 @@ enum RegsEnumArm64 : uint16_t {
     REG_LAST = REG_AARCH64_LAST,
 };
 
+// Quick unwind table registers. Besides the frame-chain set (fp/sp/pc/lr),
+// the callee-saved x19-x28 must be tracked as well: DWARF expressions read
+// them via DW_OP_breg (e.g. ART nterp's CFA expression uses bregx(x25) and
+// the DEX1 dex pc expression uses bregx(x22)). Their values are only
+// correct after the intermediate frames' CFI rules restore them from the
+// stack; dropping those rules (the old 5-entry table) leaves the live
+// context values, which are clobbered by native code and make the nterp
+// CFA evaluation fail with an unreadable sp.
 static const std::vector<uint16_t> QUT_REGS {
     REG_AARCH64_X0,
     REG_AARCH64_X29,
     REG_SP,
     REG_PC,
     REG_LR,
+    REG_AARCH64_X19,
+    REG_AARCH64_X20,
+    REG_AARCH64_X21,
+    REG_AARCH64_X22,
+    REG_AARCH64_X23,
+    REG_AARCH64_X24,
+    REG_AARCH64_X25,
+    REG_AARCH64_X26,
+    REG_AARCH64_X27,
+    REG_AARCH64_X28,
 };
 
 struct RegsUserArm64 {

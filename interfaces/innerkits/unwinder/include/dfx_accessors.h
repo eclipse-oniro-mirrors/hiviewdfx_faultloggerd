@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 #include "dfx_define.h"
 #include "smart_fd.h"
 #include "unwind_context.h"
@@ -78,6 +79,27 @@ public:
     int AccessReg(int regIdx, uintptr_t *val, void *arg) override;
     int FindUnwindTable(uintptr_t pc, UnwindTableInfo& uti, void *arg) override;
     int GetMapByPc(uintptr_t pc, std::shared_ptr<DfxMap>& map, void *arg) override;
+private:
+    // Stack reads prefer process_vm_readv with a page cache; ptrace PEEKDATA is
+    // the fallback. The first method that succeeds is locked in (AOSP
+    // MemoryRemote::Read semantics), so no per-read probing after that.
+    enum class ReadMethod : uint8_t {
+        READ_METHOD_UNDECIDED,
+        READ_METHOD_VM_READV,
+        READ_METHOD_PTRACE_PEEK,
+    };
+    bool ReadByVmReadv(uintptr_t addr, uintptr_t *val, pid_t pid);
+    bool ReadByPtrace(uintptr_t addr, uintptr_t *val, pid_t pid);
+
+    struct PageSlot {
+        uintptr_t base = 0;
+        size_t validLen = 0;
+        std::vector<uint8_t> data;
+    };
+    std::mutex cacheMutex_;
+    std::vector<PageSlot> pageCache_;
+    size_t pageSize_ = 0;
+    ReadMethod method_ = ReadMethod::READ_METHOD_UNDECIDED;
 };
 
 class DfxAccessorsCustomize : public DfxAccessors {

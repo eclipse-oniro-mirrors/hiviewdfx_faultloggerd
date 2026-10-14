@@ -32,11 +32,19 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
     DFX_TRACE_SCOPED_DLSYM("DwarfEntryParserLinearSearchEntry");
     uintptr_t fdeCount = uti.tableLen;
     uintptr_t tableData = uti.tableData;
-    DFXLOGU("LinearSearchEntry tableData:%{public}p, tableLen: %{public}u", (void*)tableData, (uint32_t)fdeCount);
+    uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
+
+    pc = pc - uti.segbase;
+    if (uti.isDebugFrame) {
+        pc -= uti.oatExecutableOffset;
+    }
+
+    DFXLOGU("LinearSearchEntry tableData:%{public}p, tableLen: %{public}u, endBoundary: %{public}p",
+        (void*)tableData, (uint32_t)fdeCount, (void*)endBoundary);
     uintptr_t i = 0;
     uintptr_t ptr = tableData;
     FrameDescEntry fdeInfo;
-    while (i++ < fdeCount && ptr < uti.endPc) {
+    while (i++ < fdeCount && ptr < endBoundary) {
         uintptr_t fdeAddr = ptr;
         if (GetCieOrFde(ptr, fdeInfo)) {
             if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
@@ -116,9 +124,17 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
         DFXLOGE("memory or rs is nullptr!");
         return false;
     }
+    SetDebugFrameMode(uti.isDebugFrame, uti.tableData);
+
+    std::shared_ptr<DfxMemory> originalMemory = memory_;
+    if (uti.isDebugFrame && uti.debugFrameMmap != nullptr) {
+        memory_ = uti.debugFrameMmap;
+    }
+
     struct UnwindEntryInfo uei;
     if ((!uti.isLinear && !SearchEntry(pc, uti, uei)) || (uti.isLinear && !LinearSearchEntry(pc, uti, uei))) {
         DFXLOGU("Failed to search unwind entry");
+        memory_ = originalMemory;
         return false;
     }
     memory_->SetDataOffset(uti.segbase);
@@ -127,19 +143,29 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
     if (!ParseFde((uintptr_t)uei.unwindInfo, (uintptr_t)uei.unwindInfo, fdeInfo)) {
         DFXLOGE("Failed to parse fde?");
         lastErrorData_.SetAddrAndCode((uintptr_t)uei.unwindInfo, UNW_ERROR_DWARF_INVALID_FDE);
+        memory_ = originalMemory;
         return false;
     }
-    if (pc < fdeInfo.pcStart || pc >= fdeInfo.pcEnd) {
-        DFXLOGU("pc: %{public}p, FDE start: %{public}p, end: %{public}p",
-            (void*)pc, (void*)fdeInfo.pcStart, (void*)fdeInfo.pcEnd);
+
+    uintptr_t checkPc = pc;
+    if (uti.isDebugFrame) {
+        checkPc = pc - uti.segbase - uti.oatExecutableOffset;
+    }
+
+    if (checkPc < fdeInfo.pcStart || checkPc >= fdeInfo.pcEnd) {
+        DFXLOGU("pc: %{public}p, checkPc: %{public}p, FDE start: %{public}p, end: %{public}p",
+            (void*)pc, (void*)checkPc, (void*)fdeInfo.pcStart, (void*)fdeInfo.pcEnd);
+        memory_ = originalMemory;
         return false;
     }
     DwarfCfaInstructions dwarfInstructions(memory_);
-    if (!dwarfInstructions.Parse(pc, fdeInfo, *(rs.get()))) {
+    if (!dwarfInstructions.Parse(checkPc, fdeInfo, *(rs.get()))) {
         DFXLOGE("Failed to parse dwarf instructions?");
-        lastErrorData_.SetAddrAndCode(pc, UNW_ERROR_DWARF_INVALID_INSTR);
+        lastErrorData_.SetAddrAndCode(checkPc, UNW_ERROR_DWARF_INVALID_INSTR);
+        memory_ = originalMemory;
         return false;
     }
+    memory_ = originalMemory;
     return true;
 }
 
@@ -181,10 +207,12 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
         if (ciePtr == cie64Value_) {
             isCieEntry = true;
             fdeInfo.cie.instructionsEnd = instructionsEnd;
-            fdeInfo.cie.pointerEncoding = DW_EH_PE_sdata8;
+            fdeInfo.cie.pointerEncoding = isDebugFrame_
+                ? DW_EH_PE_absptr
+                : DW_EH_PE_sdata8;
         } else {
             fdeInfo.instructionsEnd = instructionsEnd;
-            fdeInfo.cieAddr = static_cast<uintptr_t>(ptr - ciePtr);
+            fdeInfo.cieAddr = isDebugFrame_ ? (entriesOffset_ + ciePtr) : static_cast<uintptr_t>(ptr - ciePtr);
         }
         ptr += sizeof(uint64_t);
     } else {
@@ -194,10 +222,12 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
         if (ciePtr == cie32Value_) {
             isCieEntry = true;
             fdeInfo.cie.instructionsEnd = instructionsEnd;
-            fdeInfo.cie.pointerEncoding = DW_EH_PE_sdata4;
+            fdeInfo.cie.pointerEncoding = isDebugFrame_
+                ? DW_EH_PE_absptr
+                : DW_EH_PE_sdata4;
         } else {
             fdeInfo.instructionsEnd = instructionsEnd;
-            fdeInfo.cieAddr = static_cast<uintptr_t>(ptr - ciePtr);
+            fdeInfo.cieAddr = isDebugFrame_ ? (entriesOffset_ + ciePtr) : static_cast<uintptr_t>(ptr - ciePtr);
         }
         ptr += sizeof(uint32_t);
     }
@@ -205,7 +235,6 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
 
 bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEntry& fdeInfo)
 {
-    DFXLOGU("fdeAddr: %{public}" PRIx64 "", (uint64_t)fdeAddr);
     if (!fdeEntries_.empty()) {
         auto iter = fdeEntries_.find(fdeAddr);
         if (iter != fdeEntries_.end()) {

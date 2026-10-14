@@ -17,13 +17,20 @@
 
 #include "dfx_define.h"
 #include "dfx_dump_catcher.h"
-#include "dfx_log.h"
 #include "dfx_json_formatter.h"
 #include "dfx_kernel_stack.h"
-#include "elapsed_time.h"
-#include "procinfo.h"
-#include "proc_util.h"
+#include "dfx_log.h"
+#include "dfx_ptrace.h"
 #include "dump_utils.h"
+#include "elapsed_time.h"
+#include "file_util.h"
+#include "proc_util.h"
+#include "procinfo.h"
+#include "string_printf.h"
+#include "string_util.h"
+#include "unwind_context.h"
+#include "unwinder.h"
+#include "unwinder_config.h"
 #ifndef is_ohos_lite
 #include "bundle_mgr_interface.h"
 #include "bundle_mgr_proxy.h"
@@ -86,6 +93,10 @@ DumpCatcher &DumpCatcher::GetInstance()
 
 void DumpCatcher::Dump(const DumpOptions& dumpOpt) const
 {
+    if (IsContainerProcess(dumpOpt.pid)) {
+        DumpContainerStack(dumpOpt);
+        return;
+    }
     ElapsedTime counter;
     DfxDumpCatcher dfxDump;
     std::string msg = "";
@@ -161,6 +172,107 @@ std::string DumpCatcher::GetBundleName(int32_t pid) const
         return "";
     }
     return GetBundleNameByUid(uid);
+}
+
+bool DumpCatcher::IsContainerProcess(int32_t pid) const
+{
+    if (pid <= 0) {
+        return false;
+    }
+    std::string path = StringPrintf("/proc/%d/status", pid);
+    std::string content;
+    if (!LoadStringFromFile(path, content) || content.empty()) {
+        return false;
+    }
+
+    static const std::string nspidTag = "NSpid:";
+    size_t pos = content.find(nspidTag);
+    if (pos == std::string::npos) {
+        return false;
+    }
+
+    size_t endPos = content.find('\n', pos);
+    if (endPos == std::string::npos) {
+        endPos = content.size();
+    }
+    std::string nspidLine = content.substr(pos + nspidTag.size(), endPos - pos - nspidTag.size());
+
+    std::vector<std::string> pids;
+    size_t start = 0;
+    while (start < nspidLine.size()) {
+        size_t tabPos = nspidLine.find('\t', start);
+        std::string part;
+        if (tabPos == std::string::npos) {
+            part = nspidLine.substr(start);
+        } else {
+            part = nspidLine.substr(start, tabPos - start);
+        }
+        Trim(part);
+        if (!part.empty()) {
+            pids.push_back(part);
+        }
+        if (tabPos == std::string::npos) {
+            break;
+        }
+        start = tabPos + 1;
+    }
+
+    constexpr size_t CONTAINER_PROCESS_PID_COUNT = 2;
+    constexpr size_t CONTAINER_PID_INDEX = 1;
+    if (pids.size() < CONTAINER_PROCESS_PID_COUNT) {
+        return false;
+    }
+    return pids[CONTAINER_PID_INDEX] != "1";
+}
+
+void DumpCatcher::DumpContainerStack(const DumpOptions& dumpOpt) const
+{
+    ElapsedTime counter;
+    DFXLOGI("DUMP PID %{public}d, TID %{public}d", dumpOpt.pid, dumpOpt.tid);
+    printf("DUMP PID %d\n", dumpOpt.pid);
+
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    auto unwinder = std::make_shared<Unwinder>(dumpOpt.pid);
+
+    auto unwindSingleThread = [&](pid_t tid) -> std::string {
+        if (!DfxPtrace::Attach(tid)) {
+            printf("Failed to attach tid %d\n", tid);
+            return "";
+        }
+
+        if (!unwinder->UnwindRemote(tid, false, DEFAULT_MAX_FRAME_NUM, 0)) {
+            printf("Failed to unwind tid %d\n", tid);
+            DfxPtrace::Detach(tid);
+            return "";
+        }
+        auto frames = unwinder->GetFrames();
+        auto framesStr = Unwinder::GetFramesStr(frames);
+        DFXLOGI("frames:\n  %{public}s", framesStr.c_str());
+        DfxPtrace::Detach(tid);
+        return framesStr;
+    };
+
+    std::string framesStr;
+    if (dumpOpt.tid != 0) {
+        framesStr = unwindSingleThread(dumpOpt.tid);
+    } else {
+        std::vector<int> tids;
+        std::function<bool(int)> unwindFunc = [&](int tid) -> bool {
+            if (tid <= 0) {
+                return false;
+            }
+            std::string threadName;
+            ReadThreadName(tid, threadName);
+            framesStr += "Tid:" + std::to_string(tid) + ", Name:" + threadName + "\n";
+            framesStr += unwindSingleThread(tid);
+            return true;
+        };
+        GetTidsByPidWithFunc(dumpOpt.pid, tids, unwindFunc);
+    }
+
+    auto dumpTime = counter.Elapsed<std::chrono::milliseconds>();
+    printf("%s", framesStr.c_str());
+    printf("total cost:(%" PRId64 ")ms\n", dumpTime);
 }
 } // namespace HiviewDFX
 } // namespace OHOS

@@ -11,6 +11,8 @@
       OHOS::HiviewDFX::Unwinder::SetRegs*;
       OHOS::HiviewDFX::Unwinder::GetRegs*;
       OHOS::HiviewDFX::Unwinder::SetMaps*;
+      OHOS::HiviewDFX::Unwinder::SetPid*;
+      OHOS::HiviewDFX::Unwinder::SetEnableScanStep*;
       OHOS::HiviewDFX::Unwinder::GetMaps*;
       OHOS::HiviewDFX::Unwinder::GetLastErrorCode*;
       OHOS::HiviewDFX::Unwinder::GetLastErrorAddr*;
@@ -85,6 +87,7 @@
       OHOS::HiviewDFX::DfxPtrace::Detach*;
       OHOS::HiviewDFX::DfxPtrace::Attach*;
       OHOS::HiviewDFX::DfxMemory::ReadProcMemByPid*;
+      "vtable for OHOS::HiviewDFX::DfxMmap";
       "vtable for OHOS::HiviewDFX::DfxRegsArm";
       "vtable for OHOS::HiviewDFX::DfxRegsArm64";
       "vtable for OHOS::HiviewDFX::DfxRegsX86_64";
@@ -100,6 +103,7 @@
       OHOS::HiviewDFX::DfxElf::GetSectionInfo*;
       OHOS::HiviewDFX::DfxElf::GetSectionData*;
       OHOS::HiviewDFX::DfxElf::GetElfName*;
+      OHOS::HiviewDFX::DfxElf::Init*;
       OHOS::HiviewDFX::DfxSymbols::ParseSymbols*;
       OHOS::HiviewDFX::DfxSymbols::AddSymbolsByPlt*;
       OHOS::HiviewDFX::DfxSymbols::GetFuncNameAndOffsetByPc*;
@@ -114,6 +118,7 @@
       OHOS::HiviewDFX::DfxMaps::IsLegalMapItem*;
       OHOS::HiviewDFX::DfxMaps::GetArkStackRange*;
       OHOS::HiviewDFX::DfxMaps::GetStaticArkRange*;
+      OHOS::HiviewDFX::DfxMmap::Init*;
       OHOS::HiviewDFX::DfxElf::GetMmapPtr*;
       OHOS::HiviewDFX::LocalThreadContextMix::GetInstance*;
       OHOS::HiviewDFX::LocalThreadContextMix::GetMapByPc*;
@@ -136,6 +141,9 @@
       OHOS::HiviewDFX::DfxJsvm::ParseJsvmFrameInfo*;
       OHOS::HiviewDFX::DfxJsvm::Instance*;
       OHOS::HiviewDFX::DfxOfflineParser*;
+      OHOS::HiviewDFX::DfxJitDebug::*;
+      OHOS::HiviewDFX::DfxElf::GetFuncSymbols*;
+      OHOS::HiviewDFX::DfxElf::FindGlobalVariableByName*;
       OHOS::HiviewDFX::DfxElf::GetAdltOriginSoNameByRelPc*;
       OHOS::HiviewDFX::DfxElf::GetAdltStrtab*;
       OHOS::HiviewDFX::DfxElf::GetAdltMap*;

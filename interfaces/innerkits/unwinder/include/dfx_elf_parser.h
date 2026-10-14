@@ -60,6 +60,8 @@ public:
     virtual bool GetSectionInfo(ShdrInfo& shdr, const std::string& secName);
     virtual bool GetSectionData(unsigned char *buf, uint64_t size, std::string secName);
     virtual bool GetFuncSymbolByAddr(uint64_t addr, ElfSymbol& elfSymbol) = 0;
+    template <typename SymType>
+    bool FindSymbolByName(const std::string& name, ElfSymbol& elfSymbol);
     const std::unordered_map<uint64_t, ElfLoadInfo>& GetPtLoads() {return ptLoads_;}
     bool Read(uintptr_t pos, void *buf, size_t size);
     const GnuDebugDataHdr& GetGnuDebugDataHdr() const;
