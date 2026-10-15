@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <atomic>
-#include <utility>
 #include <mutex>
 #include <unordered_map>
 #include "dwarf_entry_parser.h"
@@ -31,47 +31,179 @@ namespace {
 #define LOG_DOMAIN 0xD002D11
 #define LOG_TAG "DfxDwarfEntryParser"
 }
-bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei)
+bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei,
+    const FrameDescEntry** cachedFde)
 {
     DFX_TRACE_SCOPED_DLSYM("DwarfEntryParserLinearSearchEntry");
-    uintptr_t fdeCount = uti.tableLen;
     uintptr_t tableData = uti.tableData;
-    uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
+    *cachedFde = nullptr;
+    // F19: disambiguate sections whose tableData is a bare file offset
+    // (.debug_frame); eh_frame tableData is an address and needs no id.
+    const uintptr_t mmapId = uti.isDebugFrame
+        ? reinterpret_cast<uintptr_t>(uti.debugFrameMmap.get()) : 0;
 
     pc = pc - uti.segbase;
     if (uti.isDebugFrame) {
         pc -= uti.oatExecutableOffset;
     }
 
-    DFXLOGU("LinearSearchEntry tableData:%{public}p, tableLen: %{public}u, endBoundary: %{public}p",
-        (void*)tableData, (uint32_t)fdeCount, (void*)endBoundary);
+    // F8(.1): small sections (per-method JIT ELFs are the common case) are
+    // cheaper to scan directly than to index; indexing thousands of one-shot
+    // sections also thrashed the cache and evicted hot DSO indexes.
+    // tableLen is an FDE count only on the known-count eh_frame_hdr path;
+    // .debug_frame sections (JIT ELFs, odex miniDebugInfo) carry ~0UL, so the
+    // small test must also accept the section byte span.
+    constexpr uintptr_t kSmallSectionFdeCount = 64;
+    constexpr uintptr_t kSmallSectionBytes = 8 * 1024;
+    uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
+    // byte-span test is only sound for .debug_frame sections, where tableData
+    // and debugFrameEnd are offsets in the same mmap; endPc is a pc-range
+    // value unrelated to tableData, so never span-test the eh_frame path.
+    bool smallSection = (uti.tableLen < kSmallSectionFdeCount);
+    if (!smallSection && uti.isDebugFrame && uti.debugFrameEnd > tableData &&
+        (uti.debugFrameEnd - tableData) < kSmallSectionBytes) {
+        smallSection = true;
+    }
+    if (smallSection) {
+        uintptr_t fdeCount = uti.tableLen;
+        uintptr_t i = 0;
+        uintptr_t ptr = tableData;
+        FrameDescEntry fdeInfo;
+        uintptr_t consecutiveSkips = 0;
+        while (i++ < fdeCount && ptr < endBoundary) {
+            uintptr_t fdeAddr = ptr;
+            if (GetCieOrFde(ptr, fdeInfo)) {
+                consecutiveSkips = 0;
+                if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
+                    DFXLOGU("Fde entry addr: %{public}" PRIx64 "", (uint64_t)fdeAddr);
+                    uei.unwindInfo = (void *)(fdeAddr);
+                    uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
+                    return true;
+                }
+            } else {
+                // tolerate bad entry: GetCieOrFde advanced ptr to entry end.
+                // guard against no-progress/backward move and runaway skipping.
+                if (ptr <= fdeAddr) {
+                    break;
+                }
+                if (++consecutiveSkips > 32) {
+                    break;
+                }
+                continue;
+            }
+        }
+        return false;
+    }
+
+    // section indexes are cached (true LRU, F8: hit promotes to front):
+    // stack walks alternate modules, so a FIFO cache thrashed on >8 hot
+    // sections and rebuilt indexes repeatedly.
+    const std::vector<FdeIndexEntry>* index = nullptr;
+    for (auto it = fdeIndexCache_.begin(); it != fdeIndexCache_.end(); ++it) {
+        if (it->tableData == tableData && it->mmapId == mmapId) {
+            if (it != fdeIndexCache_.begin()) {
+                fdeIndexCache_.splice(fdeIndexCache_.begin(), fdeIndexCache_, it);
+            }
+            index = &(fdeIndexCache_.front().entries);
+            break;
+        }
+    }
+    if (index == nullptr) {
+        index = BuildFdeIndex(uti);
+    }
+    if (index == nullptr || index->empty()) {
+        return false;
+    }
+    // sorted by pcEnd: first candidate whose pcEnd > pc, then scan forward
+    // for a covering range (pcStart <= pc < pcEnd). scan is bounded so a
+    // pathological section cannot stall the unwind.
+    auto it = std::upper_bound(index->begin(), index->end(), pc,
+        [](uintptr_t value, const FdeIndexEntry& entry) { return value < entry.pcEnd; });
+    size_t scanned = 0;
+    for (; it != index->end() && scanned < 256; ++it, ++scanned) {
+        if (pc >= it->pcStart && pc < it->pcEnd) {
+            DFXLOGU("Fde entry addr by index: %{public}" PRIx64 "", (uint64_t)it->fdeAddr);
+            uei.unwindInfo = (void *)(it->fdeAddr);
+            *cachedFde = it->entry; // F6: null falls back to ParseFde in Step
+            uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
+            return true;
+        }
+    }
+    return false;
+}
+
+const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIndex(const UnwindTableInfo& uti)
+{
+    DFX_TRACE_SCOPED_DLSYM("DwarfEntryParserBuildFdeIndex");
+    uintptr_t fdeCount = uti.tableLen;
+    uintptr_t tableData = uti.tableData;
+    uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
+    const uintptr_t mmapId = uti.isDebugFrame
+        ? reinterpret_cast<uintptr_t>(uti.debugFrameMmap.get()) : 0;
+    constexpr size_t maxSectionEntries = 512 * 1024; // guard against bogus fdeCount
+    constexpr size_t maxCachedSections = 32;
+    constexpr size_t maxTotalEntries = 1024 * 1024;  // bound cache memory (~24MB)
+
+    std::vector<FdeIndexEntry> entries;
     uintptr_t i = 0;
     uintptr_t ptr = tableData;
-    FrameDescEntry fdeInfo;
     uintptr_t consecutiveSkips = 0;
-    while (i++ < fdeCount && ptr < endBoundary) {
+    FrameDescEntry fdeInfo;
+    while (i++ < fdeCount && ptr < endBoundary && entries.size() < maxSectionEntries) {
         uintptr_t fdeAddr = ptr;
-        if (GetCieOrFde(ptr, fdeInfo)) {
+        // inline entry walk (same semantics as GetCieOrFde, but collects fde
+        // ranges instead of querying one pc; bad entries are skipped, not fatal)
+        uintptr_t entryPtr = ptr;
+        bool isCieEntry = false;
+        ParseCieOrFdeHeader(entryPtr, fdeInfo, isCieEntry);
+        uintptr_t entryEnd = isCieEntry ? fdeInfo.cie.instructionsEnd : fdeInfo.instructionsEnd;
+        bool ok;
+        if (isCieEntry) {
+            ok = ParseCie(fdeAddr, entryPtr, fdeInfo.cie);
+        } else {
+            ok = ParseFde(fdeAddr, entryPtr, fdeInfo);
+        }
+        if (ok) {
             consecutiveSkips = 0;
-            if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
-                DFXLOGU("Fde entry addr: %{public}" PRIx64 "", (uint64_t)fdeAddr);
-                uei.unwindInfo = (void *)(fdeAddr);
-                uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
-                return true;
+            if (!isCieEntry && fdeInfo.pcEnd > fdeInfo.pcStart) {
+                // F6: ParseFde just cached this fde; unordered_map nodes are
+                // address-stable and indexed entries are never erased (a
+                // cached ParseFde returns before the erase-on-fail path).
+                const FrameDescEntry* parsed = nullptr;
+                auto cached = fdeEntries_.find(fdeAddr);
+                if (cached != fdeEntries_.end()) {
+                    parsed = &cached->second;
+                }
+                entries.push_back({fdeInfo.pcStart, fdeInfo.pcEnd, fdeAddr, parsed});
             }
         } else {
-            // tolerate bad entry: GetCieOrFde advanced ptr to entry end.
-            // guard against no-progress/backward move and runaway skipping.
-            if (ptr <= fdeAddr) {
+            // tolerate: advance to entry end so collection can continue
+            if (entryEnd <= fdeAddr) {
                 break;
             }
             if (++consecutiveSkips > 32) {
                 break;
             }
-            continue;
+        }
+        ptr = (ok && !isCieEntry) ? fdeInfo.instructionsEnd : ((ok && isCieEntry) ? fdeInfo.cie.instructionsEnd : entryEnd);
+    }
+    std::sort(entries.begin(), entries.end(),
+        [](const FdeIndexEntry& a, const FdeIndexEntry& b) { return a.pcEnd < b.pcEnd; });
+    fdeIndexCache_.push_front({tableData, mmapId, std::move(entries)});
+    size_t total = fdeIndexCache_.front().entries.size();
+    for (auto& section : fdeIndexCache_) {
+        if (&section != &fdeIndexCache_.front()) {
+            total += section.entries.size();
         }
     }
-    return false;
+    while (fdeIndexCache_.size() > 1 &&
+           (fdeIndexCache_.size() > maxCachedSections || total > maxTotalEntries)) {
+        total -= fdeIndexCache_.back().entries.size();
+        fdeIndexCache_.pop_back();
+    }
+    DFXLOGU("FdeIndex built: %{public}zu entries, tableData: %{public}p, cached sections: %{public}zu",
+        fdeIndexCache_.front().entries.size(), (void*)tableData, fdeIndexCache_.size());
+    return &fdeIndexCache_.front().entries;
 }
 
 bool DwarfEntryParser::SearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei)
@@ -146,40 +278,70 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
     }
 
     struct UnwindEntryInfo uei;
-    if ((!uti.isLinear && !SearchEntry(pc, uti, uei)) || (uti.isLinear && !LinearSearchEntry(pc, uti, uei))) {
+    const FrameDescEntry* cachedFde = nullptr;
+    if ((!uti.isLinear && !SearchEntry(pc, uti, uei)) ||
+        (uti.isLinear && !LinearSearchEntry(pc, uti, uei, &cachedFde))) {
         DFXLOGU("Failed to search unwind entry");
         memory_ = originalMemory;
         return false;
     }
     memory_->SetDataOffset(uti.segbase);
 
-    FrameDescEntry* fdeInfo = FindFde((uintptr_t)uei.unwindInfo, (uintptr_t)uei.unwindInfo);
-    if (fdeInfo == nullptr) {
-        DFXLOGE("Failed to parse fde? addr: 0x%{public}" PRIx64 ", isLinear: %{public}d, isDebugFrame: %{public}d, tableData: 0x%{public}" PRIx64 "",
-            (uint64_t)(uintptr_t)uei.unwindInfo, (int)uti.isLinear, (int)uti.isDebugFrame, (uint64_t)uti.tableData);
-        lastErrorData_.SetAddrAndCode((uintptr_t)uei.unwindInfo, UNW_ERROR_DWARF_INVALID_FDE);
-        memory_ = originalMemory;
-        return false;
+    // F6: index hit carries the parsed entry; skip ParseFde entirely (its
+    // cache find was the top self-time hotspot: hash mod + bucket walk +
+    // deep copy, ~41% of post-pass under heavy app load).
+    FrameDescEntry localFdeInfo;
+    const FrameDescEntry* fdePtr = cachedFde;
+    if (fdePtr == nullptr) {
+        if (!ParseFde((uintptr_t)uei.unwindInfo, (uintptr_t)uei.unwindInfo, localFdeInfo)) {
+            DFXLOGE("Failed to parse fde? addr: 0x%{public}" PRIx64 ", isLinear: %{public}d, isDebugFrame: %{public}d",
+                (uint64_t)(uintptr_t)uei.unwindInfo, (int)uti.isLinear, (int)uti.isDebugFrame);
+            lastErrorData_.SetAddrAndCode((uintptr_t)uei.unwindInfo, UNW_ERROR_DWARF_INVALID_FDE);
+            memory_ = originalMemory;
+            return false;
+        }
+        fdePtr = &localFdeInfo;
     }
+    const FrameDescEntry& fdeInfo = *fdePtr;
 
     uintptr_t checkPc = pc;
     if (uti.isDebugFrame) {
         checkPc = pc - uti.segbase - uti.oatExecutableOffset;
     }
 
-    if (checkPc < fdeInfo->pcStart || checkPc >= fdeInfo->pcEnd) {
+    if (checkPc < fdeInfo.pcStart || checkPc >= fdeInfo.pcEnd) {
         DFXLOGU("pc: %{public}p, checkPc: %{public}p, FDE start: %{public}p, end: %{public}p",
-            (void*)pc, (void*)checkPc, (void*)fdeInfo->pcStart, (void*)fdeInfo->pcEnd);
+            (void*)pc, (void*)checkPc, (void*)fdeInfo.pcStart, (void*)fdeInfo.pcEnd);
+        memory_ = originalMemory;
+        return false;
+    }
+
+    // Epilogue ret handling: when the pc is at the function's ret
+    // instruction (last 4 bytes of the FDE range), the epilogue has
+    // already restored x29(fp) and x30(lr) to the caller's values.
+    // CFA rules that reference fp now compute a wrong CFA from the
+    // restored (caller's) fp, causing register saves to be read from
+    // wrong stack addresses. Instead of trying to correct the CFA,
+    // return false here so UpdateRegsState takes the fallback path:
+    //   - LR fallback: x30 already holds the correct return address
+    //     (loaded by the epilogue's ldp), giving the right next pc.
+    //   - FpStep: fp already holds the caller's fp, giving the correct
+    //     frame chain for subsequent unwinding.
+    // Both fallbacks use register values that are valid precisely
+    // because the epilogue has completed its restores.
+    if (checkPc + 4 >= fdeInfo.pcEnd) {
+        DFXLOGU("Epilogue ret: deferring to LR/FP fallback, pc: 0x%{public}" PRIx64, (uint64_t)pc);
         memory_ = originalMemory;
         return false;
     }
     DwarfCfaInstructions dwarfInstructions(memory_);
-    if (!dwarfInstructions.Parse(checkPc, *fdeInfo, *(rs.get()))) {
+    if (!dwarfInstructions.Parse(checkPc, fdeInfo, *(rs.get()))) {
         DFXLOGE("Failed to parse dwarf instructions?");
         lastErrorData_.SetAddrAndCode(checkPc, UNW_ERROR_DWARF_INVALID_INSTR);
         memory_ = originalMemory;
         return false;
     }
+
     memory_ = originalMemory;
     return true;
 }
@@ -200,8 +362,7 @@ bool DwarfEntryParser::GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo)
         }
         addr = fdeInfo.cie.instructionsEnd;
     } else {
-        FrameDescEntry* fde = FindFde(addr, ptr);
-        if (fde == nullptr) {
+        if (!ParseFde(addr, ptr, fdeInfo)) {
             static std::atomic<uint64_t> failCnt {0};
             if ((failCnt.fetch_add(1) % 100) == 0) {
                 DFXLOGE("Failed to Parse FDE? addr: 0x%{public}" PRIx64 ", total: %{public}" PRIx64 "",
@@ -211,9 +372,7 @@ bool DwarfEntryParser::GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo)
             addr = entryEnd;
             return false;
         }
-        fdeInfo.pcStart = fde->pcStart;
-        fdeInfo.pcEnd = fde->pcEnd;
-        addr = fde->instructionsEnd;
+        addr = fdeInfo.instructionsEnd;
     }
     return true;
 }
@@ -262,32 +421,39 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
     }
 }
 
-FrameDescEntry* DwarfEntryParser::FindFde(uintptr_t fdeAddr, uintptr_t fdePtr)
+bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEntry& fdeInfo)
 {
-    // R4: remember conclusively failed fdes (keyed with section base at failure
+    if (!fdeEntries_.empty()) {
+        auto iter = fdeEntries_.find(fdeAddr);
+        if (iter != fdeEntries_.end()) {
+            fdeInfo = iter->second;
+            return true;
+        }
+    }
+    // R4 (F7: checked after the success cache so hot steps take no lock):
+    // remember conclusively failed fdes (keyed with section base at failure
     // time) so repeated lookups skip the full parse; bounded to avoid growth.
+    // s_failedFdes and fdeEntries_ are disjoint: the fail path erases the
+    // success entry before recording the failure.
     static std::mutex s_failMutex;
     static std::unordered_map<uintptr_t, uintptr_t> s_failedFdes;
     {
         std::lock_guard<std::mutex> lock(s_failMutex);
         auto it = s_failedFdes.find(fdeAddr);
         if (it != s_failedFdes.end() && it->second == entriesOffset_) {
-            return nullptr;
+            return false;
         }
     }
-    auto iter = fdeEntries_.find(fdeAddr);
-    if (iter != fdeEntries_.end()) {
-        return &iter->second; // cache hit without object copy
-    }
 
-    FrameDescEntry fde; // local entry: header + fill, then move into cache
-    bool isCieEntry = false;
-    ParseCieOrFdeHeader(fdePtr, fde, isCieEntry);
-    if (isCieEntry) {
-        DFXLOGE("ParseFde error, is Cie Entry?");
-        return nullptr;
+    if (fdeAddr == fdePtr) {
+        bool isCieEntry = false;
+        ParseCieOrFdeHeader(fdePtr, fdeInfo, isCieEntry);
+        if (isCieEntry) {
+            DFXLOGE("ParseFde error, is Cie Entry?");
+            return false;
+        }
     }
-    if (!FillInFde(fdePtr, fde)) {
+    if (!FillInFde(fdePtr, fdeInfo)) {
         static std::atomic<uint64_t> failCnt {0};
         if ((failCnt.fetch_add(1) % 100) == 0) {
             DFXLOGE("ParseFde error, failed to fill FDE? fdeAddr: 0x%{public}" PRIx64 ", total: %{public}" PRIx64 "",
@@ -300,10 +466,10 @@ FrameDescEntry* DwarfEntryParser::FindFde(uintptr_t fdeAddr, uintptr_t fdePtr)
             }
         }
         fdeEntries_.erase(fdeAddr);
-        return nullptr;
+        return false;
     }
-    auto ret = fdeEntries_.emplace(fdeAddr, std::move(fde));
-    return &ret.first->second;
+    fdeEntries_[fdeAddr] = fdeInfo;
+    return true;
 }
 
 bool DwarfEntryParser::FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo)

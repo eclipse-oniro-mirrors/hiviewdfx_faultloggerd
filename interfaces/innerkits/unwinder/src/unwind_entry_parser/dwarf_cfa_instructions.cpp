@@ -32,7 +32,7 @@ namespace {
 #define LOG_TAG "DfxDwarfCfaInstructions"
 }
 
-bool DwarfCfaInstructions::Iterate(uintptr_t pc, FrameDescEntry fde,
+bool DwarfCfaInstructions::Iterate(uintptr_t pc, const FrameDescEntry& fde,
     uintptr_t instStart, uintptr_t instEnd, RegLocState &rsState)
 {
     uintptr_t instPtr = instStart;
@@ -66,7 +66,7 @@ bool DwarfCfaInstructions::Iterate(uintptr_t pc, FrameDescEntry fde,
     return true;
 }
 
-bool DwarfCfaInstructions::DecodeDwCfa(uint8_t opCode, CommonInfoEntry cie,
+bool DwarfCfaInstructions::DecodeDwCfa(uint8_t opCode, const CommonInfoEntry& cie,
     uintptr_t& pcOffset, uintptr_t& instPtr, RegLocState &rsState)
 {
     uintptr_t value = 0;
@@ -332,7 +332,7 @@ bool DwarfCfaInstructions::DecodeDwCfa(uint8_t opCode, CommonInfoEntry cie,
     return true;
 }
 
-bool DwarfCfaInstructions::Parse(uintptr_t pc, FrameDescEntry fde, RegLocState &rsState)
+bool DwarfCfaInstructions::Parse(uintptr_t pc, const FrameDescEntry& fde, RegLocState &rsState)
 {
     const auto& cie = fde.cie;
     rsState.returnAddressRegister = cie.returnAddressRegister;

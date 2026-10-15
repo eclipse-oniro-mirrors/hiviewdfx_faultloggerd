@@ -325,6 +325,10 @@ private:
     bool TryJitStep(uintptr_t pc, void *ctx);
     bool StepByScan(uintptr_t sp, uintptr_t currentPc);
     bool StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDexPc, uintptr_t origXRefs);
+    // x25(xREFS) captured at Unwind() entry from the perf sample
+#if defined(__aarch64__)
+    uintptr_t sampleXRefs_ = 0;
+#endif
     // AOSP16-style DEX frame injection: called at the start of each StepInner
     // iteration. If a previous DWARF Step set the dex_pc pseudo-register (via
     // the DEX1 magic marker in libart.so's CFI), inject a virtual DEX frame
@@ -938,6 +942,9 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     }
     SetLocalStackCheck(ctx, false);
     Clear();
+#if defined(__aarch64__)
+    sampleXRefs_ = (*regs_)[25]; // 25: x25(xREFS) — perf sample真值,不受CFI链污染
+#endif
 
     bool needAdjustPc = false;
     isResetFrames_ = false;
@@ -1297,7 +1304,8 @@ void Unwinder::Impl::UpdateRegsState(
     // overwrite them even when Apply returns false, and StepNterp needs
     // the original live values to locate the nterp frame.
     uintptr_t origDexPc = (*regs_)[22]; // 22: x22 (xPC) on ARM64
-    uintptr_t origXRefs = (*regs_)[25]; // 25: x25 (xREFS) on ARM64
+    // Prefer sample-time x25 (immune to CFI-chain corruption)
+    uintptr_t origXRefs = (sampleXRefs_ != 0) ? sampleXRefs_ : (*regs_)[25];
 #endif
     MAYBE_UNUSED bool noCallerInCfi = false;
     // True when this frame had no unwind table at all (the else path below).
@@ -1345,8 +1353,6 @@ void Unwinder::Impl::UpdateRegsState(
     if (!unwinderResult) {
         unwinderResult = StepNterp(frame.pc, frame.sp, origDexPc, origXRefs);
         if (unwinderResult) {
-            DFXLOGU("StepNterp success, pc: 0x%{public}" PRIx64 " -> 0x%{public}" PRIx64 "",
-                (uint64_t)frame.pc, (uint64_t)regs_->GetPc());
             isFpStep_ = false;
         }
     }
