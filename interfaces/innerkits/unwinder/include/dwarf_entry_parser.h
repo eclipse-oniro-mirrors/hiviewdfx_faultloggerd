@@ -17,6 +17,8 @@
 
 #include <cinttypes>
 #include <memory>
+#include <list>
+#include <vector>
 #include <unordered_map>
 #include "dwarf_define.h"
 #include "dfx_errors.h"
@@ -41,10 +43,34 @@ public:
     bool Step(uintptr_t pc, const UnwindTableInfo& uti, std::shared_ptr<RegLocState> rs) override;
 protected:
     bool SearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei) override;
-    FrameDescEntry* FindFde(uintptr_t fdeAddr, uintptr_t fdePtr);
+    bool ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEntry& fdeInfo);
     bool ParseCie(uintptr_t cieAddr, uintptr_t ciePtr, CommonInfoEntry& cieInfo);
 private:
-    bool LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei);
+    bool LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei,
+        const FrameDescEntry** cachedFde);
+    // sorted fde index (by pcEnd) to replace per-step O(N) scan, following
+    // libunwindstack DwarfSection binary search table design. a small LRU of
+    // per-section indexes avoids rebuilding when stack walks alternate modules.
+    struct FdeIndexEntry {
+        uintptr_t pcStart;
+        uintptr_t pcEnd;
+        uintptr_t fdeAddr;
+        // points into fdeEntries_ (unordered_map node addresses are
+        // stable; indexed entries are never erased because a cached
+        // ParseFde always hits and cannot reach the erase-on-fail path)
+        const FrameDescEntry* entry;
+    };
+    struct SectionIndex {
+        uintptr_t tableData;
+        // F19: .debug_frame sections key tableData by file offset (shdr.offset),
+        // which can be identical across different DSOs (miniDebugInfo buffers
+        // share similar layouts); mix in the backing mmap identity so such
+        // sections cannot false-hit each other's index.
+        uintptr_t mmapId;
+        std::vector<FdeIndexEntry> entries;
+    };
+    std::list<SectionIndex> fdeIndexCache_; // MRU at front
+    const std::vector<FdeIndexEntry>* BuildFdeIndex(const UnwindTableInfo& uti);
     bool GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo);
     void ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeInfo, bool& isCieEntry);
     bool FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo);

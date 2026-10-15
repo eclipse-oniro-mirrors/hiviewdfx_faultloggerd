@@ -518,14 +518,9 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
     static size_t s_entriesSizeWhenCached = 0;
     {
         std::lock_guard<std::mutex> missLock(s_missMutex);
-        size_t cached = s_entriesSizeWhenCached;
-        size_t nowSz = entries_.size();
-        size_t threshold = cached / 8;  // 12.5%
-        if (threshold < 4) { threshold = 4; }  // min guard
-        if ((nowSz > cached && nowSz - cached > threshold) ||
-            (cached > nowSz && cached - nowSz > threshold)) {
+        if (entries_.size() != s_entriesSizeWhenCached) {
             s_missedPcs.clear();
-            s_entriesSizeWhenCached = nowSz;
+            s_entriesSizeWhenCached = entries_.size();
         }
         if (s_missedPcs.find(pc) != s_missedPcs.end()) {
             return false;
