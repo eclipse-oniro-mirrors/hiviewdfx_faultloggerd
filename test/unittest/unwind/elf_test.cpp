@@ -391,5 +391,31 @@ HWTEST_F(DfxElfTest, DfxElfTest010, TestSize.Level2)
     bool isvalid = elf->IsValidElf(nullptr, 0);
     ASSERT_FALSE(isvalid);
 }
+
+/**
+ * @tc.name: DfxElfTestParseElfDynamicAllEntries
+ * @tc.desc: verify ParseElfDynamic parses all DT entries (DT_SONAME, DT_STRSZ, DT_PLTGOT)
+ *           without premature break at DT_PLTGOT. libadlt_test's dynamic section order is:
+ *           DT_SONAME(14) -> ... -> DT_PLTGOT(3) -> ... -> DT_STRTAB(5) -> DT_STRSZ(10) -> DT_NULL
+ *           Old code break at DT_PLTGOT skips DT_STRSZ, leaving dtStrtabSize_=0.
+ *           New validation dtSonameOffset_ > dtStrtabSize_ then fails, soname lost.
+ * @tc.type: FUNC
+ */
+HWTEST_F(DfxElfTest, DfxElfTestParseElfDynamicAllEntries, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxElfTestParseElfDynamicAllEntries: start.";
+    std::string filePath = "/data/test/resource/testdata/libadlt_test";
+    RegularElfFactory factory(filePath);
+    auto elf = factory.Create();
+    ASSERT_TRUE(elf != nullptr);
+    ASSERT_TRUE(elf->IsValid());
+    uintptr_t gp = elf->GetGlobalPointer();
+    EXPECT_NE(gp, 0) << "GetGlobalPointer should be non-zero (DT_PLTGOT parsed)";
+    std::string soname = elf->GetElfName();
+    EXPECT_FALSE(soname.empty()) << "GetElfName should return non-empty soname (DT_SONAME+DT_STRSZ parsed)";
+    EXPECT_NE(soname.find("libadlt"), std::string::npos) << "soname should contain 'libadlt'";
+    GTEST_LOG_(INFO) << "soname: " << soname << ", gp: " << gp;
+    GTEST_LOG_(INFO) << "DfxElfTestParseElfDynamicAllEntries: end.";
+}
 } // namespace HiviewDFX
 } // namespace OHOS
