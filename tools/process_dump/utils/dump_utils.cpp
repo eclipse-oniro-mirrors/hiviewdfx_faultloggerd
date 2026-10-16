@@ -15,6 +15,7 @@
 #include "dump_utils.h"
 
 #include <algorithm>
+#include <limits>
 #include <vector>
 #include <pthread.h>
 #include <sys/ptrace.h>
@@ -278,14 +279,17 @@ void DumpUtils::WaitForFork(pid_t pid, pid_t& childPid)
     }
     DFXLOGI("wait for fork status %{public}d", waitStatus);
     if (static_cast<unsigned int>(waitStatus) >> 8 == (SIGTRAP | (PTRACE_EVENT_FORK << 8))) { // 8 : get fork event
-        if (ptrace(PTRACE_GETEVENTMSG, pid, NULL, &childPid) != 0) {
+        // PTRACE_GETEVENTMSG writes a native unsigned long, which can be wider than pid_t.
+        unsigned long eventMsg = 0;
+        if (ptrace(PTRACE_GETEVENTMSG, pid, nullptr, &eventMsg) != 0) {
             DFXLOGE("PTRACE_GETEVENTMSG failed: %{public}s", strerror(errno));
             return;
         }
-        if (childPid <= 0) {
-            DFXLOGE("invalid child pid: %{public}d", childPid);
+        if (eventMsg == 0 || eventMsg > static_cast<unsigned long>(std::numeric_limits<pid_t>::max())) {
+            DFXLOGE("invalid child pid: %{public}lu", eventMsg);
             return;
         }
+        childPid = static_cast<pid_t>(eventMsg);
         DFXLOGI("next child pid %{public}d", childPid);
         if (waitpid(childPid, &waitStatus, 0) != childPid) {
             DFXLOGE("waitpid for child failed: %{public}s", strerror(errno));

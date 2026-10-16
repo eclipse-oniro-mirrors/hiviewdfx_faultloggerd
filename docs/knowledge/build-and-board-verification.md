@@ -68,6 +68,12 @@ python3 base/hiviewdfx/faultloggerd/test/scripts/check_updater_processdump.py \
 此检查不替代 updater 真机上的崩溃日志验证。基础回栈库仍可能间接依赖事件上报等公共库，
 不能仅根据 `update_processdump` 的直接依赖删除镜像中其他组件需要的库。
 
+可在 ARM64 系统虚拟机中使用 updater 的用户态文件系统验证基本崩溃链路：将专用产物安装为
+`/bin/processdump`，通过信号处理器分别触发 SIGSEGV、SIGABRT 和多线程崩溃。未启动 faultloggerd 时，
+检查 `/log/crash/cppcrash-*.json` 的回退输出，核对信号、PID、崩溃线程符号栈、寄存器以及其他线程栈。
+虚拟机验证应记录产物哈希与日志原件；最小启动环境的结果不覆盖完整 updater 初始化及 SELinux 策略。
+ARM64 的 fork 事件消息必须用 `unsigned long` 接收，校验范围后再转为 `pid_t`，防止内核写入越界。
+
 ## 测试
 
 ### 测试分类
