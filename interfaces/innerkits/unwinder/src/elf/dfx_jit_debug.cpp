@@ -14,6 +14,8 @@
  */
 
 #include <unordered_map>
+#include <deque>
+#include <algorithm>
 #include <unordered_set>
 #include <mutex>
 #include "dfx_jit_debug.h"
@@ -508,25 +510,46 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
     // miss cache: collapse repeated lookups of the same unmatched pc, so we skip
     // the O(entries) walk and the repeated error log. invalidated when the entry
     // count changes, because jit code cache ranges can be reused after gc.
+    // F16-0: keys carry the pid. The caches are process-global statics while
+    // DfxJitDebug instances are per-pid (per Unwinder), so a bare pc key let
+    // one process hit another process' jit elf at the same numeric address.
+    // per-pid bucketed caches: a flat (pid,pc) key with one global 8192 cap
+    // lets the first pid fill the table and starve every later pid (each of
+    // its lookups degrading to the O(entries) walk + remote reads), and pins
+    // dead pids' elfs forever. Buckets give each pid its own caps and are
+    // evicted whole (LRU) so nothing is pinned indefinitely.
+    struct PerPidJitCache {
+        std::unordered_map<uint64_t, std::pair<std::shared_ptr<DfxElf>, uint64_t>> hitPcs;
+        std::unordered_set<uint64_t> missedPcs;
+        size_t entriesSizeWhenCached = 0;
+    };
     static std::mutex s_missMutex;
-    static std::unordered_set<uint64_t> s_missedPcs;
-    // hit cache: freeze the jit elf of the FIRST successful lookup per pc.
-    // the jit code cache may reclaim entries while a caller (e.g. hiperf
-    // delayed unwind) keeps unwinding samples of the same pc; the first
-    // result is the closest to sampling time, so reuse it for consistency.
-    static std::unordered_map<uint64_t, std::pair<std::shared_ptr<DfxElf>, uint64_t>> s_hitPcs;
-    static size_t s_entriesSizeWhenCached = 0;
+    static std::unordered_map<uint32_t, PerPidJitCache> s_jitPerPid;
+    static std::deque<uint32_t> s_pidLru; // front = least recently used
+    constexpr size_t kMaxPerPidEntries = 8192;
+    constexpr size_t kMaxPids = 4;
+    const uint32_t keyPid = static_cast<uint32_t>(pid_);
     {
         std::lock_guard<std::mutex> missLock(s_missMutex);
-        if (entries_.size() != s_entriesSizeWhenCached) {
-            s_missedPcs.clear();
-            s_entriesSizeWhenCached = entries_.size();
+        auto lruIt = std::find(s_pidLru.begin(), s_pidLru.end(), keyPid);
+        if (lruIt != s_pidLru.end()) {
+            s_pidLru.erase(lruIt);
         }
-        if (s_missedPcs.find(pc) != s_missedPcs.end()) {
+        s_pidLru.push_back(keyPid);
+        while (s_pidLru.size() > kMaxPids) {
+            s_jitPerPid.erase(s_pidLru.front());
+            s_pidLru.pop_front();
+        }
+        PerPidJitCache& bucket = s_jitPerPid[keyPid];
+        if (entries_.size() != bucket.entriesSizeWhenCached) {
+            bucket.missedPcs.clear(); // only this pid's misses, other pids untouched
+            bucket.entriesSizeWhenCached = entries_.size();
+        }
+        if (bucket.missedPcs.find(pc) != bucket.missedPcs.end()) {
             return false;
         }
-        auto hit = s_hitPcs.find(pc);
-        if (hit != s_hitPcs.end()) {
+        auto hit = bucket.hitPcs.find(pc);
+        if (hit != bucket.hitPcs.end()) {
             elf = hit->second.first;
             loadBias = hit->second.second;
             return true;
@@ -576,8 +599,9 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
             loadBias = jitElf->GetLoadBias();
             {
                 std::lock_guard<std::mutex> missLock(s_missMutex);
-                if (s_hitPcs.size() < 8192) {
-                    s_hitPcs[pc] = std::make_pair(jitElf, loadBias);
+                auto& bucket = s_jitPerPid[keyPid];
+                if (bucket.hitPcs.size() < kMaxPerPidEntries) {
+                    bucket.hitPcs[pc] = std::make_pair(jitElf, loadBias);
                 }
             }
             return true;
@@ -588,9 +612,9 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
 
     {
         std::lock_guard<std::mutex> missLock(s_missMutex);
-        constexpr size_t maxMissCacheSize = 8192;
-        if (s_missedPcs.size() < maxMissCacheSize) {
-            s_missedPcs.insert(pc);
+        auto& bucket = s_jitPerPid[keyPid];
+        if (bucket.missedPcs.size() < kMaxPerPidEntries) {
+            bucket.missedPcs.insert(pc);
         }
     }
     DFXLOGE("FindJitElf: no JIT ELF found for pc=0x%{public}" PRIx64 ", entries=%{public}zu", pc, entries_.size());

@@ -148,6 +148,32 @@ std::shared_ptr<DfxElf> RegularElfFactory::Create()
         DFXLOGE("Failed to open file: %{public}s, errno(%{public}d)", filePath_.c_str(), errno);
         return regularElf;
     }
+    // P14: the target process may keep mapping an old inode after ART's
+    // dex2oat atomically renamed a fresh file over this path (base.odex.tmp).
+    // Parsing the new file against the old mapping misaligns every unwind
+    // table and fabricates wrong frames, so refuse to read it: return the
+    // uninitialized elf (same as the open-failure path) and let the module
+    // degrade to "no unwind info". Anonymous/unknown identity (all zero)
+    // keeps the old behavior.
+    if (devMajor_ != 0 && inode_ != 0) { // both present (real file) or skip
+        struct stat st = {};
+        if (fstat(smartFd.GetFd(), &st) != 0) {
+            DFXLOGE("fstat failed, cannot verify identity: %{public}s, errno(%{public}d)",
+                filePath_.c_str(), errno);
+            return regularElf; // unverified: not latched, retried (old behavior)
+        }
+        // decode st_dev inline (identical to musl/kernel userspace encoding)
+        // instead of major()/minor() macros: no <sys/sysmacros.h> dependency,
+        // compiles on every target (device, linux host, mingw).
+        const uint64_t dv = static_cast<uint64_t>(st.st_dev);
+        const uint64_t stMajor = ((dv >> 32) & 0xfffff000ull) | ((dv >> 8) & 0xfffull);
+        const uint64_t stMinor = ((dv >> 12) & 0xffffff00ull) | (dv & 0xffull);
+        if (stMajor != devMajor_ || stMinor != devMinor_ ||
+            static_cast<ino_t>(st.st_ino) != inode_) {
+            DFXLOGE("Module file replaced (TOCTOU), skip reading: %{public}s", filePath_.c_str());
+            return nullptr; // distinct from open-failure: latched by DfxMap::GetElf
+        }
+    }
     auto mMap = std::make_shared<DfxMmap>();
     if (!mMap->Init(smartFd.GetFd(), static_cast<size_t>(GetFileSize(smartFd.GetFd())), 0)) {
         DFXLOGE("Failed to mmap init.");
