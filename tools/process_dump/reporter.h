@@ -53,7 +53,15 @@ public:
     void Report(DfxProcess& process, const ProcessDumpRequest &request);
 };
 
+#ifdef DFX_UPDATER_PROCESSDUMP
+// The updater variant does not compile reporter.cpp; reporting is a no-op
+// there. Keeping call sites unmodified preserves the mainline function size.
+inline void ReportToAbilityManagerService(const DfxProcess&, const ProcessDumpRequest&)
+{
+}
+#else
 void ReportToAbilityManagerService(const DfxProcess& process, const ProcessDumpRequest &request);
+#endif
 } // namespace HiviewDFX
 } // namespace OHOS
 #endif

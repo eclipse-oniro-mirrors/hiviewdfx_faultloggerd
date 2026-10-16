@@ -567,9 +567,7 @@ void ProcessDumper::PrintDumpInfo(DumpErrorCode& dumpRes)
     if (request_.type == ProcessDumpType::DUMP_TYPE_CPP_CRASH) {
         DumpUtils::InfoCrashUnwindResult(request_, unwindSuccessCnt > 0);
         DumpUtils::BlockCrashProcExit(request_);
-#ifndef DFX_UPDATER_PROCESSDUMP
         ReportToAbilityManagerService(*process_, request_);
-#endif
     }
     if (!DumpUtils::IsSelinuxPermissive() && request_.uid > MIN_HAP_UID) {
         process_->Detach();  // crash scene
