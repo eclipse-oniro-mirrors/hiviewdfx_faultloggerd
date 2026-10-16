@@ -24,10 +24,12 @@
 #include "dfx_define.h"
 #include "dfx_log.h"
 #include "dfx_util.h"
+#ifndef DFX_UPDATER_PROCESSDUMP
 #include "lite_perf_dumper.h"
 #include "lite_process_dumper.h"
 #ifndef is_ohos_lite
 #include "minidump_dumper.h"
+#endif
 #endif
 #include "process_dumper.h"
 
@@ -43,6 +45,7 @@ static void PrintCommandHelp()
     printf("%s\nplease use dumpcatcher\n", DUMP_STACK_TAG_USAGE.c_str());
 }
 
+#ifndef DFX_UPDATER_PROCESSDUMP
 static bool StartLitePerf(int argc, char *argv[])
 {
     if (argc < 3) { // 3 : contain type requestFd
@@ -88,6 +91,7 @@ static bool StartMinidump(int argc, char *argv[])
 #endif
     return true;
 }
+#endif
 
 static bool ParseParameters(int argc, char *argv[])
 {
@@ -101,6 +105,7 @@ static bool ParseParameters(int argc, char *argv[])
         OHOS::HiviewDFX::ProcessDumper::GetInstance().Dump();
         return true;
     }
+#ifndef DFX_UPDATER_PROCESSDUMP
     if (!strcmp("-liteperf", argv[DUMP_ARG_ONE])) {
         return StartLitePerf(argc, argv);
     }
@@ -125,6 +130,7 @@ static bool ParseParameters(int argc, char *argv[])
         alarm(PROCESSDUMP_TIMEOUT);
         return StartMinidump(argc, argv);
     }
+#endif
     return false;
 }
 

@@ -31,13 +31,15 @@
 #include "dfx_util.h"
 #include "dfx_offline_parser.h"
 #ifndef is_ohos_lite
+#ifndef DFX_UPDATER_PROCESSDUMP
 #include "bundle_mgr_interface.h"
 #include "bundle_mgr_proxy.h"
 #include "if_system_ability_manager.h"
 #include "iservice_registry.h"
+#include "system_ability_definition.h"
+#endif
 #include "parameters.h"
 #include "parameter.h"
-#include "system_ability_definition.h"
 #endif
 namespace OHOS {
 namespace HiviewDFX {
@@ -180,7 +182,7 @@ bool DumpUtils::ReadTargetMemory(pid_t tid, uintptr_t addr, uintptr_t &value)
     return true;
 }
 
-#ifndef is_ohos_lite
+#if !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
 sptr<AppExecFwk::IBundleMgr> GetBundleManager()
 {
     auto systemManager = SystemAbilityManagerClient::GetInstance().GetSystemAbilityManager();
@@ -221,7 +223,7 @@ AppExecFwk::BundleInfo* GetBundleInfo()
 
 std::string DumpUtils::GetSelfBundleName()
 {
-#ifndef is_ohos_lite
+#if !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     auto bundleInfo = GetBundleInfo();
     if (bundleInfo == nullptr) {
         return "";
@@ -233,7 +235,7 @@ std::string DumpUtils::GetSelfBundleName()
 
 bool DumpUtils::HasCoredumpPermission()
 {
-#ifndef is_ohos_lite
+#if !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     auto bundleInfo = GetBundleInfo();
     if (bundleInfo == nullptr) {
         return false;

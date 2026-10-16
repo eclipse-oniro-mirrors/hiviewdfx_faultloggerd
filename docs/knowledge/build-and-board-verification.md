@@ -22,6 +22,7 @@
 | --- | --- | --- |
 | faultloggerd | `services:faultloggerd` | `/system/bin/faultloggerd` |
 | processdump | `tools/process_dump:processdump` | `/system/bin/processdump` |
+| update_processdump | `tools/process_dump:update_processdump_install` | updater 镜像中的 `/bin/processdump` |
 | dumpcatcher | `tools/dump_catcher:dumpcatcher` | `/system/bin/dumpcatcher` |
 | crasher_c | `tests/crasher/crasher_c:crasher_c` | 测试崩溃器（C） |
 | crasher_cpp | `tests/crasher/crasher_cpp:crasher_cpp` | 测试崩溃器（C++） |
@@ -49,6 +50,23 @@
 ### 轻量系统
 
 `is_ohos_lite` 定义时，部分模块不构建，使用简化路径（见各 BUILD.gn 中的 `if (defined(ohos_lite))` 分支）。
+
+### Updater ProcessDump
+
+标准系统和 updater 分别构建 `processdump`、`update_processdump`，后者通过安装复制目标保留
+`/bin/processdump` 的名称。updater 只接受 `-signalhandler` 入口，保留 native 崩溃、主动抓栈和
+现有 JSON 日志格式，不编入 LitePerf、render、coredump/minidump 或应用框架上报。
+专用宏 `DFX_UPDATER_PROCESSDUMP` 不改变 `ProcessDumpRequest` 的布局；不得用 `is_ohos_lite` 替代。
+
+构建完成后，检查安装路径以及 updater 中完整的动态库依赖链：
+
+```sh
+python3 base/hiviewdfx/faultloggerd/test/scripts/check_updater_processdump.py \
+    --build-dir out/rk3568 --updater-root out/rk3568/packages/phone/updater
+```
+
+此检查不替代 updater 真机上的崩溃日志验证。基础回栈库仍可能间接依赖事件上报等公共库，
+不能仅根据 `update_processdump` 的直接依赖删除镜像中其他组件需要的库。
 
 ## 测试
 

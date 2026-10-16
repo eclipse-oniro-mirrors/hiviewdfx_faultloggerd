@@ -313,11 +313,83 @@ if (defined(ohos_lite)) {
       cflags_cc += [ "-DHAS_LIB_SELINUX" ]
     }
     version_script = "processdump.map"
-    install_images = [
-      "system",
-      "updater",
-    ]
+    install_images = [ "system" ]
 
+    part_name = "faultloggerd"
+    subsystem_name = "hiviewdfx"
+  }
+
+  ohos_executable("update_processdump") {
+    install_enable = false
+    branch_protector_ret = "pac_ret"
+    configs = [
+      ":processdump_config",
+      "$faultloggerd_common_path/build:coverage_flags",
+    ]
+    include_dirs = [ "$faultloggerd_common_path/trace/include" ]
+    sources = processdump_sources
+    sources -= [
+      "lite_process_dumper.cpp",
+      "minidump_dumper.cpp",
+    ]
+    sources += [ "main.cpp" ]
+    defines = [
+      "DFX_UPDATER_PROCESSDUMP",
+      "HISYSEVENT_DISABLE",
+    ]
+    if (use_clang_coverage) {
+      defines += [ "CLANG_COVERAGE" ]
+    }
+    cflags = [
+      "-Os",
+      "-fdata-sections",
+      "-ffunction-sections",
+      "-fno-asynchronous-unwind-tables",
+      "-fno-unwind-tables",
+      "-fno-omit-frame-pointer",
+      "-fno-rtti",
+      "-fno-exceptions",
+    ]
+    cflags_cc = cflags
+    deps = [
+      "$faultloggerd_common_path/cppcrash_formatter:cppcrash_formatter_src",
+      "$faultloggerd_common_path/cutil:dfx_cutil",
+      "$faultloggerd_common_path/dfxlog:dfx_hilog",
+      "$faultloggerd_common_path/dfxutil:libdfx_util",
+      "$faultloggerd_interfaces_path/innerkits/async_stack:libasync_stack",
+      "$faultloggerd_interfaces_path/innerkits/backtrace:libbacktrace_local",
+      "$faultloggerd_interfaces_path/innerkits/crash_exception",
+      "$faultloggerd_interfaces_path/innerkits/faultloggerd_client:libfaultloggerd",
+      "$faultloggerd_interfaces_path/innerkits/procinfo:libdfx_procinfo",
+      "$faultloggerd_interfaces_path/innerkits/unwinder:libunwinder",
+    ]
+    external_deps = [
+      "bounds_checking_function:libsec_shared",
+      "cJSON:cjson",
+      "c_utils:utils",
+      "hilog:libhilog",
+      "init:libbegetutil",
+      "jsoncpp:jsoncpp",
+    ]
+    if (build_selinux) {
+      external_deps += [ "selinux:libselinux" ]
+      cflags_cc += [ "-DHAS_LIB_SELINUX" ]
+    }
+    version_script = "processdump.map"
+    part_name = "faultloggerd"
+    subsystem_name = "hiviewdfx"
+  }
+
+  # Keep build outputs distinct while preserving the executable name in updater.
+  ohos_prebuilt_executable("update_processdump_install") {
+    source = "$root_out_dir/update_processdump"
+    if (is_standard_system) {
+      source = "$root_out_dir/hiviewdfx/faultloggerd/update_processdump"
+    }
+    output = "updater/processdump"
+    deps = [ ":update_processdump" ]
+    install_enable = true
+    install_images = [ "updater" ]
     part_name = "faultloggerd"
     subsystem_name = "hiviewdfx"
   }

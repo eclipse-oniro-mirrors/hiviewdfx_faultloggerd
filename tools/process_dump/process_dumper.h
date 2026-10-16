@@ -25,7 +25,7 @@
 #include <thread>
 
 #include "reporter.h"
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
 #include "coredump_manager.h"
 #endif
 #include "dfx_dump_request.h"
@@ -96,7 +96,7 @@ private:
     bool isJsonDump_ = false;
     uint64_t expectedDumpFinishTime_ = 0;
     std::future<void> createMapsFuture_;
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     std::unique_ptr<CoredumpManager> coredumpManager_;
 #endif
     uint64_t finishParseSymbolTime_ = 0;

@@ -35,6 +35,8 @@ group("faultloggerd_targets") {
       if (!support_jsapi) {
         deps -= [ "tools/process_dump:processdump" ]
         deps -= [ "tools/dump_catcher:dumpcatcher" ]
+      } else {
+        deps += [ "tools/process_dump:update_processdump_install" ]
       }
     }
   }

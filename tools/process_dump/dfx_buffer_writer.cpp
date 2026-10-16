@@ -211,8 +211,10 @@ bool DfxBufferWriter::InitBufferWriter(const ProcessDumpRequest& request)
             .tid = request_.tid,
             .time = request_.timeStamp,
         };
+#ifndef DFX_UPDATER_PROCESSDUMP
         faultloggerdRequest.minidump = (faultloggerdRequest.type == FaultLoggerType::CPP_CRASH) ?
             IsMiniDumpEnable(request.crashLogConfig) : false;
+#endif
         bufferFd = SmartFd {RequestFileDescriptorEx(&faultloggerdRequest)};
         if (!bufferFd) {
             DFXLOGW("Failed to request_ fd from faultloggerd.");
