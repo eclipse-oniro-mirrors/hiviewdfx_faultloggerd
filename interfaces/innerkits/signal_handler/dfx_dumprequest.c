@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -31,6 +32,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -107,7 +109,6 @@ static const int ALARM_TIME_S = 10;
 static const int PRVI_FORK_ALARM_TIME_S = 8;
 static const int TRY_WAIT_SECONDS = 1;
 static const int DUMMY_PROCESS_ALARM_TIME_S = 3; // 3 sec, > readRegsTimeout(3s), defensive self-terminate for dummy
-static const uint32_t CRASH_SNAPSHOT_FLAG = 0x8;
 static const int WAITPID_TIMEOUT = 3000; // 3000 : 3 sec timeout
 enum DumpPreparationStage {
     CREATE_PIPE_FAIL = 1,
@@ -672,16 +673,20 @@ static bool ReadProcessDumpGetRegsMsg(void)
     return false;
 }
 
-void SetKernelSnapshot(bool enable)
+bool SetDieCatch(uint32_t flag, bool enable)
 {
+    if (flag != CRASH_SNAPSHOT_FLAG && flag != EXIT_CATCH_ABORT_MASK) {
+        return false;
+    }
     const char *filePath = "/proc/self/unexpected_die_catch";
     if (access(filePath, F_OK) < 0) {
-        return;
+        return false;
     }
     int dieCatchFd = SysOpen(filePath, O_RDWR);
     if (dieCatchFd < 0) {
-        return;
+        return false;
     }
+    bool result = false;
     do {
         char val[10] = {0}; // 10 : to save diecatch val
         if (syscall(SYS_read, dieCatchFd, val, sizeof(val)) < 0) {
@@ -692,28 +697,31 @@ void SetKernelSnapshot(bool enable)
             DFXLOGE("Failed to lseek unexpecterd_die_catch %{public}d", errno);
             break;
         }
-
-        uint32_t num = (uint32_t)strtoul(val, NULL, 16); // 16 : val is hex
-        if (errno == ERANGE) {
+        errno = 0;
+        unsigned long parsedValue = strtoul(val, NULL, 16); // 16 : val is hex
+        if (parsedValue == ULONG_MAX && errno == ERANGE) {
             DFXLOGE("Failed to cast unexpecterd_die_catch val to int %{public}d", errno);
             break;
         }
+        uint32_t num = (uint32_t)parsedValue;
         if (enable) {
-            num |= CRASH_SNAPSHOT_FLAG;
+            num |= flag;
         } else {
-            num &= (~CRASH_SNAPSHOT_FLAG);
+            num &= (~flag);
         }
-
         (void)memset_s(val, sizeof(val), 0, sizeof(val));
         if (snprintf_s(val, sizeof(val), sizeof(val) - 1, "0x%x", num) < 0) {
-            DFXLOGE("Failed to format unexpecterd_die_catch val %{public}d", errno);
+            DFXLOGE("Failed to format unexpected_die_catch value");
             break;
         }
         if (syscall(SYS_write, dieCatchFd, val, sizeof(val)) < 0) {
             DFXLOGE("Failed to write unexpecterd_die_catch %{public}d", errno);
+            break;
         }
+        result = true;
     } while (false);
     syscall(SYS_close, dieCatchFd);
+    return result;
 }
 
 static void ReadUnwindFinishMsg(int signo)
@@ -725,7 +733,7 @@ static void ReadUnwindFinishMsg(int signo)
     DFXLOGI("crash processdump unwind finish, unwind success Flag %{public}ld, blockFlag %{public}ld",
         g_unwindResult, g_blockExit);
     if (g_unwindResult == CRASH_UNWIND_SUCCESS_FLAG) {
-        SetKernelSnapshot(false);
+        (void)SetDieCatch(CRASH_SNAPSHOT_FLAG, false);
 #ifndef is_ohos_lite
         RequestSetMinidumpToCrashLog(false, getpid());
 #endif
@@ -741,7 +749,7 @@ static int ProcessDump(int signo)
     bool isCrash = !IsDumpSignal(signo);
     if (isCrash) {
         ResetFlags();
-        SetKernelSnapshot(true);
+        (void)SetDieCatch(CRASH_SNAPSHOT_FLAG, true);
 #ifndef is_ohos_lite
         HiLogRecordSnapshot(HILOG_SNAPSHOT_LINES, g_request->timeStamp);
 #endif
