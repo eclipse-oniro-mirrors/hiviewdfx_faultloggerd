@@ -32,11 +32,18 @@ public:
 
 class RegularElfFactory : public ElfFactory {
 public:
-    explicit RegularElfFactory(const std::string& filePath) : filePath_(filePath) {}
+    explicit RegularElfFactory(const std::string& filePath,
+        uint64_t devMajor = 0, uint64_t devMinor = 0, ino_t inode = 0)
+        : filePath_(filePath), devMajor_(devMajor), devMinor_(devMinor), inode_(inode) {}
     ~RegularElfFactory() override = default;
     std::shared_ptr<DfxElf> Create() override;
 private:
     std::string filePath_;
+    // P14: identity of the file the target process actually mapped
+    // (from /proc/pid/maps); used to detect rename-replacement (TOCTOU).
+    uint64_t devMajor_ = 0;
+    uint64_t devMinor_ = 0;
+    ino_t inode_ = 0;
 };
 
 #if defined(ENABLE_MINIDEBUGINFO)

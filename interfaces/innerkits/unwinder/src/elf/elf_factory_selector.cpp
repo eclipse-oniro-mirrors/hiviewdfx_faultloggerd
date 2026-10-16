@@ -45,7 +45,7 @@ std::shared_ptr<ElfFactory> ElfFactorySelector::Select(DfxMap& map, pid_t pid)
     } else if (map.IsVdsoMap()) {
         elfFactory = std::make_shared<VdsoElfFactory>(map.begin, map.end - map.begin, pid);
     } else {
-        elfFactory = std::make_shared<RegularElfFactory>(map.name);
+        elfFactory = std::make_shared<RegularElfFactory>(map.name, map.major, map.minor, map.inode);
     }
     return elfFactory;
 }

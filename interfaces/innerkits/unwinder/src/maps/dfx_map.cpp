@@ -372,6 +372,9 @@ const std::shared_ptr<DfxHap> DfxMap::GetHap()
 const std::shared_ptr<DfxElf> DfxMap::GetElf(pid_t pid)
 {
     std::lock_guard<std::mutex> lock(*elfMutex_);
+    if (elfLoadFailed_) { // P14: latched failure, do not retry per frame
+        return nullptr;
+    }
     if (elf == nullptr) {
         if (name.empty()) {
             DFXLOGE("Invalid map, name empty.");
@@ -381,9 +384,17 @@ const std::shared_ptr<DfxElf> DfxMap::GetElf(pid_t pid)
         if (elfFactory != nullptr) {
             elf = elfFactory->Create();
         }
+        bool createReturnedNull = (elf == nullptr);
         if (elf != nullptr && !elf->IsValid()) {
             elf = nullptr;
         }
+        if (createReturnedNull) {
+            // factory refused (TOCTOU-replaced file): the file does not come
+            // back within this process lifetime, latch the failure.
+            elfLoadFailed_ = true;
+            return nullptr;
+        }
+        // open/parse failures above keep the old per-frame retry behavior.
         // adlt need update lodeBase
         if (elf != nullptr && elf->IsAdlt()) {
             elf->SetLoadBase(GetAdltLoadBase());

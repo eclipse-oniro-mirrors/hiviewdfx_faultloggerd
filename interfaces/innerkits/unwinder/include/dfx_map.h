@@ -77,6 +77,10 @@ public:
     std::string perms = ""; // 5:rwxp
     std::string name = "";
     std::shared_ptr<DfxElf> elf = nullptr;
+    // P14: latched when elf creation was attempted and produced an invalid
+    // elf (TOCTOU-replaced or unreadable file); stops per-frame re-open +
+    // re-log storms. Reset never needed within a process lifetime.
+    bool elfLoadFailed_ = false;
     std::shared_ptr<DfxHap> hap = nullptr;
     std::shared_ptr<DfxMap> prevMap = nullptr;
     uint64_t elfOffset = 0;

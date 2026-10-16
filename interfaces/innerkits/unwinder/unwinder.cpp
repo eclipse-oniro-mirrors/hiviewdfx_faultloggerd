@@ -329,6 +329,12 @@ private:
 #if defined(__aarch64__)
     uintptr_t sampleXRefs_ = 0;
 #endif
+    // K12: map-pointer cache for thread-root candidates (libc/ld-musl maps).
+    // Frames in those maps are cheap to classify; only they pay a symbol
+    // lookup. Untouched when lookup fails (strip/unreachable) = old behavior.
+    std::unordered_map<const DfxMap *, bool> rootMapCache_ {};
+    const DfxMaps *rootMapGen_ = nullptr; // maps_ generation, invalidates cache
+    bool IsThreadRootFrame();
     // AOSP16-style DEX frame injection: called at the start of each StepInner
     // iteration. If a previous DWARF Step set the dex_pc pseudo-register (via
     // the DEX1 magic marker in libart.so's CFI), inject a virtual DEX frame
@@ -892,6 +898,51 @@ bool Unwinder::Impl::StepV8Frame(StepFrame& frame, const std::shared_ptr<DfxMap>
     return true;
 }
 
+// K12: __start_thread / __libc_init are the stack bottom of a thread; any
+// frame beyond them (produced by scan/LR/fp fallbacks from stack-bottom
+// residue) is an artifact. Observed on ~82% of hiperf sample chains
+// (trampoline mirror + repeated start); cdumpcatcher is unaffected.
+bool Unwinder::Impl::IsThreadRootFrame()
+{
+    if (frames_.size() < 2 || maps_ == nullptr) {
+        return false;
+    }
+    if (rootMapGen_ != maps_.get()) { // maps snapshot replaced: drop stale keys
+        rootMapCache_.clear();
+        rootMapGen_ = maps_.get();
+    }
+    const DfxFrame& fr = frames_.back();
+    const DfxMap* m = fr.map.get();
+    if (m == nullptr) {
+        return false;
+    }
+    bool isRootMap = false;
+    auto it = rootMapCache_.find(m);
+    if (it != rootMapCache_.end()) {
+        isRootMap = it->second;
+    } else {
+        const std::string& name = m->name;
+        // exact module names only: a bare "libc" substring would also match
+        // libcrypto / libc++_shared and pay needless symbol lookups.
+        isRootMap = (name.size() >= 8 && name.compare(name.size() - 8, 8, "/libc.so") == 0) ||
+                    (name.find("ld-musl") != std::string::npos);
+        if (rootMapCache_.size() < 16) { // bounded: a pid has a handful of libc maps
+            rootMapCache_[m] = isRootMap;
+        }
+    }
+    if (!isRootMap) {
+        return false;
+    }
+    std::string funcName;
+    uint64_t funcOffset = 0;
+    if (!GetSymbolByPc(fr.pc, maps_, funcName, funcOffset)) {
+        return false; // no symbol -> keep unwinding (old behavior)
+    }
+    return (funcName.find("__start_thread") != std::string::npos) ||
+           (funcName.find("__libc_init") != std::string::npos) ||
+           (funcName.find("__libc_start_main") != std::string::npos);
+}
+
 bool Unwinder::Impl::UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc)
 {
     frame.pc = regs_->GetPc();
@@ -963,6 +1014,9 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
         }
 
         if (!UnwindFrame(ctx, frame, needAdjustPc)) {
+            break;
+        }
+        if (IsThreadRootFrame()) { // K12: thread root reached, stop unwinding
             break;
         }
     } while (true);
