@@ -14,7 +14,6 @@
  */
 #include "dump_utils.h"
 
-#include <algorithm>
 #include <limits>
 #include <vector>
 #include <pthread.h>
@@ -232,19 +231,6 @@ std::string DumpUtils::GetSelfBundleName()
     return bundleInfo->name;
 #endif
     return "";
-}
-
-bool DumpUtils::HasCoredumpPermission()
-{
-#if !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
-    auto bundleInfo = GetBundleInfo();
-    if (bundleInfo == nullptr) {
-        return false;
-    }
-    const std::vector<std::string>& perms = bundleInfo->reqPermissions;
-    return std::find(perms.begin(), perms.end(), "ohos.permission.ALLOW_COREDUMP") != perms.end();
-#endif
-    return false;
 }
 
 void DumpUtils::InfoCrashUnwindResult(const ProcessDumpRequest& request, bool isUnwindSucc)
