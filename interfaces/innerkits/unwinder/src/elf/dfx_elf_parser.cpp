@@ -372,9 +372,7 @@ bool ElfParser::ParseElfDynamic()
     for (; reinterpret_cast<const uint8_t*>(dyn) + sizeof(DynType) <= mmapEnd &&
          dyn->d_tag != DT_NULL; ++dyn) {
         if (dyn->d_tag == DT_PLTGOT) {
-            // Assume that _DYNAMIC is writable and GLIBC has relocated it (true for x86 at least).
             dtPltGotAddr_ = dyn->d_un.d_ptr;
-            break;
         } else if (dyn->d_tag == DT_STRTAB) {
             dtStrtabAddr_ = dyn->d_un.d_ptr;
         } else if (dyn->d_tag == DT_STRSZ) {
