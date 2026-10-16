@@ -176,6 +176,17 @@ bool IsDfrBetaVersion()
 #endif
 }
 
+bool IsDfrRootVersion()
+{
+#if !defined(is_ohos_lite) && !defined(DFX_UTIL_STATIC)
+    const char *const logsystemVersionType = "const.debuggable";
+    static bool isRootVersion = OHOS::system::GetBoolParameter(logsystemVersionType, false);
+    return isRootVersion;
+#else
+    return false;
+#endif
+}
+
 bool IsDfrDeveloperMode()
 {
 #if !defined(is_ohos_lite) && !defined(DFX_UTIL_STATIC)

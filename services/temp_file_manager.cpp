@@ -34,6 +34,7 @@
 #include "dfx_socket_request.h"
 #include "dfx_trace.h"
 #include "directory_ex.h"
+#include "dfx_util.h"
 #include "file_ex.h"
 #include "time_task.h"
 
@@ -643,6 +644,7 @@ void TempFileManager::TempFileWatcher::HandleDirRemoved()
 {
     std::string summary = "The temp file directory: " +
         FaultLoggerConfig::GetInstance().GetTempFileConfig().tempFilePath + " was removed unexpectedly";
+    summary += IsDfrRootVersion() ? " at root version" : " at user version";
     DFXLOGE("%{public}s", summary.c_str());
 #ifndef HISYSEVENT_DISABLE
     auto now = std::chrono::system_clock::now();
