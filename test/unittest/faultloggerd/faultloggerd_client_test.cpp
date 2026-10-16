@@ -139,6 +139,19 @@ HWTEST_F(FaultloggerdClientTest, RequestFileDescriptorTest003, TestSize.Level2)
 }
 
 /**
+ * @tc.name: RequestFileDescriptorTest004
+ * @tc.desc: test the function for RequestFileDescriptor.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestFileDescriptorTest004, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestFileDescriptorTest004: start.";
+    SmartFd sFd(RequestFileDescriptor(FaultLoggerType::ADDR_SANITIZER));
+    ASSERT_EQ(sFd.GetFd(), 0);
+    GTEST_LOG_(INFO) << "RequestFileDescriptorTest004: end.";
+}
+
+/**
  * @tc.name: RequestFileDescriptorEx001
  * @tc.desc: test the function for RequestFileDescriptorEx with invalid parameter.
  * @tc.type: FUNC
