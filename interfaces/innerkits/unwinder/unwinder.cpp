@@ -926,7 +926,11 @@ bool Unwinder::Impl::IsThreadRootFrame()
         // libcrypto / libc++_shared and pay needless symbol lookups.
         isRootMap = (name.size() >= 8 && name.compare(name.size() - 8, 8, "/libc.so") == 0) ||
                     (name.find("ld-musl") != std::string::npos);
-        if (rootMapCache_.size() < 16) { // bounded: a pid has a handful of libc maps
+        // qwen review: 16 is too small — a process has 100+ distinct DfxMap
+        // pointers (one per VMA per so); at 16, most app-library frames miss
+        // the cache and pay a string comparison every frame (the 2.58%
+        // hotspot). 512 entries ≈ 30KB covers the full working set.
+        if (rootMapCache_.size() < 512) {
             rootMapCache_[m] = isRootMap;
         }
     }
@@ -1532,6 +1536,13 @@ void Unwinder::Impl::UpdateCache(uintptr_t pc, bool hasRegLocState, const std::s
     const std::shared_ptr<DfxMap>& map)
 {
     if (hasRegLocState && enableCache_) {
+        // bound the cache: pcs are mostly unique across samples (hiperf
+        // post-pass), so a full clear loses almost nothing. ~64K entries
+        // ≈ 3-4 MB including node overhead (sizeof(StepCache)=16B).
+        constexpr size_t kMaxStepCacheEntries = 65536;
+        if (stepCache_.size() >= kMaxStepCacheEntries) {
+            stepCache_.clear();
+        }
         StepCache cache;
         cache.map = map;
         cache.rs = rs;

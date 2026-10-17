@@ -244,7 +244,10 @@ std::shared_ptr<DfxElf> CompressHapElfFactory::Create()
     SmartFd smartFd(static_cast<int>(OHOS_TEMP_FAILURE_RETRY(open(filePath_.c_str(), O_RDONLY))));
     if (!smartFd) {
         DFXLOGE("Failed to open hap file, errno(%{public}d)", errno);
-        return nullptr;
+        // transient failure (fd exhaustion, timing): return an invalid elf
+        // (not nullptr) so DfxMap::GetElf does NOT latch it — keeps the
+        // per-frame retry semantics aligned with RegularElfFactory.
+        return std::make_shared<DfxElf>();
     }
 
     // 1) apk: .so ELF header typically at the current map's own offset.
