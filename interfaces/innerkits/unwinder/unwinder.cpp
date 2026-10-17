@@ -328,7 +328,12 @@ private:
     // x25(xREFS) captured at Unwind() entry from the perf sample
 #if defined(__aarch64__)
     uintptr_t sampleXRefs_ = 0;
+    // x29(FP) at Unwind() entry — sample true value, immune to
+    // CFI/fallback-chain pollution (speed-profile doc §7 fix)
+    uintptr_t sampleX29_ = 0;
 #endif
+    // FpTailUnwind: pure-FP chain tail from sample x29 (anchor-continuation)
+    void FpTailUnwind(void* ctx, size_t maxFrameNum);
     // K12: map-pointer cache for thread-root candidates (libc/ld-musl maps).
     // Frames in those maps are cheap to classify; only they pay a symbol
     // lookup. Untouched when lookup fails (strip/unreachable) = old behavior.
@@ -947,6 +952,79 @@ bool Unwinder::Impl::IsThreadRootFrame()
            (funcName.find("__libc_start_main") != std::string::npos);
 }
 
+#if defined(__aarch64__)
+// FpTailUnwind: walk the pure FP chain from the original sample x29.
+// v2 anchor-continuation design (FpStep_odex doc):
+//   - anchor = frames_.back().sp (last successful frame's SP, always clean
+//     because failed frames are never added to frames_)
+//   - only append frames whose fp > anchor (physically deeper in stack)
+//   - no pc comparison / no dedup — avoids return-addr vs DoPcAdjust
+//     mismatch and legitimate-recursion false deletion
+//   - stops at thread root (IsThreadRootFrame) / fp non-increasing /
+//     read failure / frame budget
+void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
+{
+    if (ctx != nullptr && memory_ != nullptr) {
+        memory_->SetCtx(ctx);
+    }
+    if (frames_.empty()) return;
+    // anchor: SP of the last successfully added frame (clean, unpolluted)
+    uintptr_t anchor = frames_.back().sp;
+    uintptr_t fp = sampleX29_;
+    uintptr_t prevFp = 0;
+    size_t budget = maxFrameNum - frames_.size();
+    size_t appended = 0;
+    while (fp != 0 && fp > prevFp && appended < budget) {
+        uintptr_t nextFp = 0, nextPc = 0;
+        if (!memory_->Read<uintptr_t>(fp, &nextFp, false)) break;
+        if (!memory_->Read<uintptr_t>(fp + sizeof(uintptr_t), &nextPc, false)) break;
+        if (nextFp == 0 || nextFp <= fp) break;
+        nextPc = StripPac(nextPc, pacMask_);
+        // anchor-continuation: skip frames at or above the anchor
+        // (already unwound by the main loop); only append deeper frames
+        if (fp <= anchor) {
+            prevFp = fp;
+            fp = nextFp;
+            continue;
+        }
+        // validate: pc must be in an executable map (reject stack residue)
+        std::shared_ptr<DfxMap> map = nullptr;
+        if (maps_ == nullptr || !maps_->FindMapByAddr(nextPc, map) ||
+            map == nullptr || !map->IsMapExec()) {
+            break; // garbage pc — stop, don't fabricate frames
+        }
+        StepFrame frame;
+        frame.pc = nextPc;
+        frame.sp = fp;
+        frame.fp = nextFp;
+        AddFrame(frame, map);
+        appended++;
+        // thread-root check (K12, same logic)
+        if (!frames_.empty()) {
+            const auto& lastF = frames_.back();
+            if (lastF.map != nullptr) {
+                const std::string& mn = lastF.map->name;
+                if (mn.size() >= 8 &&
+                    mn.compare(mn.size() - 8, 8, "/libc.so") == 0) {
+                    std::string fn; uint64_t fo = 0;
+                    if (GetSymbolByPc(lastF.pc, maps_, fn, fo) &&
+                        (fn.find("__start_thread") != std::string::npos ||
+                         fn.find("__libc_init") != std::string::npos)) {
+                        break;
+                    }
+                }
+            }
+        }
+        prevFp = fp;
+        fp = nextFp;
+    }
+    if (appended > 0) {
+        DFXLOGU("FpTailUnwind: appended %zu frames (anchor=0x%lx)",
+            appended, (uint64_t)anchor);
+    }
+}
+#endif
+
 bool Unwinder::Impl::UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc)
 {
     frame.pc = regs_->GetPc();
@@ -998,7 +1076,8 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     SetLocalStackCheck(ctx, false);
     Clear();
 #if defined(__aarch64__)
-    sampleXRefs_ = (*regs_)[25]; // 25: x25(xREFS) — perf sample真值,不受CFI链污染
+    sampleXRefs_ = (*regs_)[25];
+    sampleX29_ = (*regs_)[29]; // 29: x29(FP) — sample FP chain anchor // 25: x25(xREFS) — perf sample真值,不受CFI链污染
 #endif
 
     bool needAdjustPc = false;
@@ -1024,6 +1103,16 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
             break;
         }
     } while (true);
+#if defined(__aarch64__)
+    // speed-profile doc §7: when dwarf broke in no-table odex and the
+    // fallback chain got polluted, the ART-maintained FP chain from the
+    // original sample x29 is still valid. Walk it as ultimate fallback
+    // (anchor-continuation: only append frames physically deeper than
+    // the last successful frame's SP — no pc comparison, no dedup).
+    if (sampleX29_ != 0 && !frames_.empty()) {
+        FpTailUnwind(ctx, maxFrameNum);
+    }
+#endif
     DFXLOGU("Last error code: %{public}d, addr: %{public}p",
         (int)GetLastErrorCode(), reinterpret_cast<void *>(GetLastErrorAddr()));
     DFXLOGU("Last frame size: %{public}zu, last frame pc: %{public}p",
