@@ -16,6 +16,7 @@
 #include <atomic>
 #include "unwinder.h"
 
+#include <sys/uio.h>
 #include <unordered_map>
 #include <link.h>
 
@@ -1155,6 +1156,47 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     if (stopByFailure && sampleX29_ != 0 && !frames_.empty()) {
         FpTailUnwind(ctx, maxFrameNum);
     }
+#if defined(__aarch64__)
+    // Managed-stack probe (prototype, milestone M1): when the chain broke and
+    // the sample carries a plausible art::Thread* in x28 (ART quick-code SELF
+    // convention), dump the Thread object neighborhood via process_vm_readv
+    // (memory_->Read cannot reach anonymous heap; the JIT reader proved this
+    // direct path works in-process). Probe file only — no behavior change,
+    // throttled to a few dumps per process for offline offset analysis.
+    if (stopByFailure) {
+        static std::atomic<uint32_t> sProbeCount {0};
+        uintptr_t self = (*regs_)[REG_AARCH64_X28];
+        if (self > 0x10000 && (self & 7) == 0 && pid_ > 0 &&
+            sProbeCount.fetch_add(1) < 16) {
+            const uintptr_t page = self & ~static_cast<uintptr_t>(0xfff);
+            const size_t kBytes = 8192; // covers [page, page+8K): self and the
+                                        // tls_/tlsPtr_ neighborhood after it
+            uint8_t out[kBytes];
+            bool ok = true;
+            for (size_t i = 0; i < kBytes && ok; i += sizeof(uintptr_t)) {
+                struct iovec local { out + i, sizeof(uintptr_t) };
+                struct iovec remote { reinterpret_cast<void *>(page + i), sizeof(uintptr_t) };
+                if (process_vm_readv(pid_, &local, 1, &remote, 1, 0) !=
+                    static_cast<ssize_t>(sizeof(uintptr_t))) {
+                    ok = false;
+                }
+            }
+            if (ok) {
+                char probePath[96] = {0};
+                if (snprintf_s(probePath, sizeof(probePath), sizeof(probePath) - 1,
+                    "/data/local/tmp/mprobe_%u.bin", sProbeCount.load()) > 0) {
+                    FILE* pf = fopen(probePath, "wb");
+                    if (pf != nullptr) {
+                        fwrite(out, 1, kBytes, pf);
+                        fclose(pf);
+                        DFXLOGW("ManagedProbe: dumped thread=%{private}p to %{public}s",
+                            reinterpret_cast<void *>(self), probePath);
+                    }
+                }
+            }
+        }
+    }
+#endif
     DFXLOGU("Last error code: %{public}d, addr: %{public}p",
         (int)GetLastErrorCode(), reinterpret_cast<void *>(GetLastErrorAddr()));
     DFXLOGU("Last frame size: %{public}zu, last frame pc: %{public}p",
