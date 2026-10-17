@@ -341,6 +341,10 @@ private:
     // instance = per target pid; ASLR differs between processes).
     uintptr_t libartBase_ = 0;
     bool libartBaseFound_ = false;
+    // StepManaged off by default (review R6): live chain measured ~0 gain and
+    // costs a process_vm_readv round per broken chain; flip on when hiperf
+    // starts attaching sample-time managed snapshots.
+    bool enableManagedWalk_ = false;
 #endif
     // FpTailUnwind: pure-FP chain tail from sample x29 (anchor-continuation)
     void FpTailUnwind(void* ctx, size_t maxFrameNum);
@@ -1082,15 +1086,33 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
     if (frames_.empty() || maps_ == nullptr) return;
     if (!libartBaseFound_) {
         libartBaseFound_ = true;
+        // Load base = the LOWEST libart.so mapping (the r-- ELF-header LOAD),
+        // not "any exec mapping": with several rx rows the first exec row may
+        // be a mid-LOAD vaddr and bias+symbolOffset would be wrong (review R3).
+        uintptr_t lowest = UINTPTR_MAX;
         for (const auto& m : maps_->GetMaps()) {
-            if (m != nullptr && m->IsMapExec() &&
-                m->name.find("libart.so") != std::string::npos &&
+            if (m != nullptr && m->name.find("libart.so") != std::string::npos &&
                 m->name.find("libartbase") == std::string::npos &&
-                m->name.find("libartd") == std::string::npos) {
-                libartBase_ = m->begin;
-                break;
+                m->name.find("libartd") == std::string::npos &&
+                m->begin < lowest) {
+                lowest = m->begin;
             }
         }
+        if (lowest == UINTPTR_MAX) return;
+        // Machine-code signature of the bridge prologue (review R3/R5):
+        //   +0x00: sub sp, sp, #224        = 0xd10383ff
+        //   +0x40: stp x29, x30, [sp,#208] = 0xa90d7bfd
+        // Any mismatch (ART update moved/changed the bridge) fails CLOSED:
+        // StepBridge stays disabled instead of gambling on stale offsets.
+        uintptr_t a0 = lowest + kBridgeOff;
+        uintptr_t a40 = lowest + kBridgeOff + 0x40;
+        uintptr_t w0 = 0, w40 = 0;
+        if (!memory_->Read<uintptr_t>(a0, &w0, false) ||
+            !memory_->Read<uintptr_t>(a40, &w40, false) ||
+            w0 != 0xd10383ffULL || w40 != 0xa90d7bfdULL) {
+            return; // signature mismatch — keep libartBase_ == 0 (disabled)
+        }
+        libartBase_ = lowest;
     }
     if (libartBase_ == 0) return;
     const DfxFrame& last = frames_.back();
@@ -1107,6 +1129,11 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
     uintptr_t callerPc = StripPac(callerLr, pacMask_);
     DoPcAdjust(callerPc);
     if (callerFp <= bridgeSp || callerPc == 0) return; // implausible
+    // Stack-residue hardening (review R1): ABI alignment, monotonic growth
+    // past the broken frame's own fp, and within the captured stack window.
+    if ((callerFp & 0xf) != 0) return;
+    if (callerFp <= static_cast<uintptr_t>(last.fp)) return;
+    if (callerFp - bridgeSp > 0x10000) return;
     std::shared_ptr<DfxMap> map = nullptr;
     if (!maps_->FindMapByAddr(callerPc, map) || map == nullptr || !map->IsMapExec()) return;
     StepFrame frame;
@@ -1114,6 +1141,19 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
     frame.sp = bridgeSp + kBridgeFrameSize;
     frame.fp = callerFp;
     AddFrame(frame, map);
+    // Trigger/continuation observability (review R3): logs are stripped in
+    // release builds, so persist a one-line counter file (every 1000 hits).
+    {
+        static std::atomic<uint32_t> sBridgeHits {0};
+        uint32_t n = sBridgeHits.fetch_add(1) + 1;
+        if ((n % 1000) == 0) {
+            FILE* sf = fopen("/data/local/tmp/bridge_stats", "a");
+            if (sf != nullptr) {
+                fprintf(sf, "hits=%u\n", n);
+                fclose(sf);
+            }
+        }
+    }
     // The caller is quick code: continue over standard frame records,
     // same walking rules as FpTailUnwind.
     uintptr_t fp = callerFp;
@@ -1362,9 +1402,13 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     }
     // M3: after the FP tail, try the live managed chain — it crosses the
     // JNI/nterp barriers that stop the FP walk (chain head sits behind them).
-    if (stopByFailure && !frames_.empty()) {
+    // Gated OFF by default (review R6): live walk measured ~0 gain (deep
+    // frames pop before unwind time) at a vm-readv cost per broken chain.
+#if defined(__aarch64__)
+    if (stopByFailure && enableManagedWalk_ && !frames_.empty()) {
         StepManaged(ctx, maxFrameNum);
     }
+#endif
 #if defined(__aarch64__)
     // Managed-stack probe (prototype, milestone M1): when the chain broke and
     // the sample carries a plausible art::Thread* in x28 (ART quick-code SELF
