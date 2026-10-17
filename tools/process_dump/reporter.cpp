@@ -49,6 +49,8 @@ SysEventReporter::SysEventReporter(const ProcessDumpType& processDumpType)
         && processDumpType <=  ProcessDumpType::DUMP_TYPE_BADFD)
         || processDumpType == ProcessDumpType::DUMP_TYPE_ARKTS_ENVSAN) {
         reporter_ = std::make_shared<AddrSanitizerReporter>();
+    } else if (processDumpType == ProcessDumpType::DUMP_TYPE_FILE_DELETE) {
+        reporter_ = std::make_shared<FileDeleteReporter>();
     }
 }
 void SysEventReporter::Report(DfxProcess& process, const ProcessDumpRequest &request)
@@ -238,6 +240,31 @@ void AddrSanitizerReporter::Report(DfxProcess& process, const ProcessDumpRequest
     DFXLOGI("%{public}s", "Report ADDR_SANITIZER event done.");
 #else
     DFXLOGW("%{public}s", "Not supported for ADDR_SANITIZER reporting.");
+#endif
+}
+
+void FileDeleteReporter::Report(DfxProcess& process, const ProcessDumpRequest &request)
+{
+#ifndef HISYSEVENT_DISABLE
+    std::string reason = process.GetReason().empty() ? "DEBUG SIGNAL" : process.GetReason();
+    std::string summary;
+    if (process.GetKeyThread() != nullptr) {
+        bool needPrintTid = false;
+        summary = process.GetKeyThread()->ToString(needPrintTid);
+    }
+    uint32_t inodeId = static_cast<uint32_t>(request.siginfo.si_value.sival_int);
+    HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::RELIABILITY, "FILE_DELETED",
+                    OHOS::HiviewDFX::HiSysEvent::EventType::FAULT,
+                    "MODULE", request.processName,
+                    "PID", request.pid,
+                    "UID", request.uid,
+                    "HAPPEN_TIME", request.timeStamp,
+                    "REASON", reason,
+                    "SUMMARY", summary,
+                    "INODE_ID", inodeId);
+    DFXLOGI("Report FILE_DELETED event done. inode_id:%{public}u", inodeId);
+#else
+    DFXLOGW("%{public}s", "Not supported for FILE_DELETED reporting.");
 #endif
 }
 } // namespace HiviewDFX

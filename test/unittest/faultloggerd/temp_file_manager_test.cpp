@@ -389,5 +389,27 @@ HWTEST_F(TempFileManagerTest, FileSizeMonitorTest01, TestSize.Level2)
     ASSERT_EQ(stat(testFileName.c_str(), &st), 0);
     ASSERT_EQ(static_cast<uint64_t>(st.st_size), 2ULL << 10); // 2KB
 }
+
+/**
+ * @tc.name: ScanCurrentFilesOnStartTest05
+ * @tc.desc: stacktrace-filedelete files are grouped into the shared "stacktrace" config
+ *          for aging and quota accounting.
+ * @tc.type: FUNC
+ */
+HWTEST_F(ScanCurrentFilesTest, ScanCurrentFilesOnStartTest05, TestSize.Level2)
+{
+    constexpr uint32_t fileDeleteAgeSec = 1;       // 1 : backdate seconds of the filedelete file
+    constexpr uint32_t stacktraceAgeSec = 2;       // 2 : backdate seconds of the stacktrace file
+    constexpr int32_t expectSharedGroupCount = 2;  // 2 : both files share the stacktrace config group
+    string fileDeleteFile = GetFileName("stacktrace-filedelete", fileDeleteAgeSec);
+    ASSERT_TRUE(CreateTestFile(fileDeleteFile));
+    string stacktraceFile = GetFileName("stacktrace", stacktraceAgeSec);
+    ASSERT_TRUE(CreateTestFile(stacktraceFile));
+    tempFileManager.ScanTempFilesOnStart();
+    ASSERT_EQ(tempFileManager.GetTargetFileCount(FaultLoggerType::CPP_STACKTRACE), expectSharedGroupCount);
+    ASSERT_TRUE(IsFileExist(fileDeleteFile));
+    ASSERT_TRUE(IsFileExist(stacktraceFile));
+    tempFileManager.fileCounts_.clear();
+}
 }
 }

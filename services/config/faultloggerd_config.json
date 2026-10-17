@@ -219,6 +219,11 @@
      "fileOwnerUid": 1201
     },
     {
+      "type": 123,
+      "fileNamePrefix": "stacktrace-filedelete",
+      "maxSingleFileSizeInKB": 2048
+    },
+    {
       "type": -1,
       "fileNamePrefix": "trace",
       "maxSingleFileSizeInKB": 5120,

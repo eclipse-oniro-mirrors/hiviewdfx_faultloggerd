@@ -20,6 +20,7 @@
 #include <csignal>
 #include <string>
 
+#include "dfx_define.h"
 #include "dfx_signal.h"
 #include "dfx_test_util.h"
 
@@ -261,5 +262,26 @@ HWTEST_F(DfxSignalTest, DfxSignalTest009, TestSize.Level2)
         }
     }
     GTEST_LOG_(INFO) << "DfxSignalTest009: end.";
+}
+
+/**
+ * @tc.name: DfxSignalTest010
+ * @tc.desc: test FormatSIGLEAKCodeName of SIGLEAK_STACK_FILE_DELETE
+ * @tc.type: FUNC
+ */
+HWTEST_F(DfxSignalTest, DfxSignalTest010, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxSignalTest010: start.";
+    siginfo_t si = {
+        .si_signo = SIGLEAK_STACK,
+        .si_errno = 0,
+        .si_code = -SIGLEAK_STACK_FILE_DELETE,
+        .si_value.sival_int = 0
+    };
+    std::string sigStr = DfxSignal::PrintSignal(si);
+    GTEST_LOG_(INFO) << sigStr;
+    ASSERT_TRUE(sigStr.find("Signal:DEBUG SIGNAL(FILE_DELETE)") != std::string::npos);
+    ASSERT_TRUE(DfxSignal::FormatCodeName(SIGLEAK_STACK, SIGLEAK_STACK_FILE_DELETE) == "FILE_DELETE");
+    GTEST_LOG_(INFO) << "DfxSignalTest010: end.";
 }
 }

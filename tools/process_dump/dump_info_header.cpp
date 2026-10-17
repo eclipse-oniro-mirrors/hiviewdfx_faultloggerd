@@ -179,6 +179,8 @@ std::string DumpInfoHeader::GetReasonInfo(const ProcessDumpRequest& request, Dfx
             }
         } else if (request.siginfo.si_signo == SIGSYS && request.siginfo.si_code == SYS_SECCOMP) {
             reasonInfo += StringPrintf(" syscall number is %d", request.siginfo.si_syscall);
+        } else if (request.type == ProcessDumpType::DUMP_TYPE_FILE_DELETE) {
+            reasonInfo += StringPrintf(" inode_id:%d", request.siginfo.si_value.sival_int);
         }
     } while (false);
     reasonInfo += "\n";

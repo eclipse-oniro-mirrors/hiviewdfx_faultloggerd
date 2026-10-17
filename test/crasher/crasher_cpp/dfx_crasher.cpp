@@ -33,6 +33,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <thread>
 #include <unistd.h>
@@ -180,6 +181,8 @@ constexpr static CrasherCommandLineParam CMDLINE_TABLE_PARAM[] = {
     {"CrashInFFRT", "Test async-stacktrace api in ffrt crash case",
         &DfxCrasher::CrashInFFRT},
 #endif
+    {"FileDeleteTrigger", "trigger sig42 with si_code=-5 and inode id, e.g. FileDeleteTrigger 12345",
+        &DfxCrasher::FileDeleteTrigger},
 };
 
 DfxCrasher::DfxCrasher() {}
@@ -666,6 +669,33 @@ NOINLINE int DfxCrasher::DoDumpCrash()
     });
     raise(SIGDUMP);
     t.join();
+    return 0;
+}
+
+NOINLINE int DfxCrasher::FileDeleteTrigger(const std::string &inodeStr)
+{
+    constexpr int decimalBase = 10;
+    constexpr unsigned int waitDumpSeconds = 5;
+    errno = 0;
+    char *endPtr = nullptr;
+    long parsedInode = strtol(inodeStr.c_str(), &endPtr, decimalBase);
+    if (errno != 0 || endPtr == inodeStr.c_str() || parsedInode > INT32_MAX || parsedInode < INT32_MIN) {
+        std::cerr << "invalid inode id: " << inodeStr << ", errno: " << errno << std::endl;
+        return -1;
+    }
+    int32_t inodeId = static_cast<int32_t>(parsedInode);
+    siginfo_t si = {};
+    si.si_signo = SIGLEAK_STACK;
+    si.si_errno = 0;
+    si.si_code = -SIGLEAK_STACK_FILE_DELETE;
+    si.si_value.sival_int = inodeId;
+    std::cout << "trigger FILE_DELETED, pid: " << getpid() << ", inode_id: " << inodeId << std::endl;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), gettid(), SIGLEAK_STACK, &si) != 0) {
+        std::cerr << "failed to send SIGLEAK_STACK, errno: " << errno << std::endl;
+        return -1;
+    }
+    // keep process alive so that processdump can finish ptrace unwind
+    sleep(waitDumpSeconds);
     return 0;
 }
 

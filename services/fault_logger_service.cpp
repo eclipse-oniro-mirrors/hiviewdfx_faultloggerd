@@ -325,6 +325,7 @@ bool FileDesService::Filter(const std::string& socketName, const struct ucred& c
         case FaultLoggerType::CPP_STACKTRACE:
         case FaultLoggerType::LEAK_STACKTRACE:
         case FaultLoggerType::JIT_CODE_LOG:
+        case FaultLoggerType::FILE_DELETE_STACKTRACE:
             return socketName == SERVER_CRASH_SOCKET_NAME;
         default:
             return CheckRequestCredential(creds, requestData.pid);

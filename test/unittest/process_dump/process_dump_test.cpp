@@ -368,6 +368,8 @@ HWTEST_F (ProcessDumpTest, LiteProcessDumpTest009, TestSize.Level2)
     EXPECT_EQ(writer.GetFaultloggerdRequestType(), FaultLoggerType::CPP_STACKTRACE);
     writer.request_.siginfo.si_code = -SIGLEAK_STACK_BADFD;
     EXPECT_EQ(writer.GetFaultloggerdRequestType(), FaultLoggerType::CPP_STACKTRACE);
+    writer.request_.siginfo.si_code = -SIGLEAK_STACK_FILE_DELETE;
+    EXPECT_EQ(writer.GetFaultloggerdRequestType(), FaultLoggerType::FILE_DELETE_STACKTRACE);
     writer.request_.siginfo.si_code = -99;
     EXPECT_EQ(writer.GetFaultloggerdRequestType(), FaultLoggerType::LEAK_STACKTRACE);
 

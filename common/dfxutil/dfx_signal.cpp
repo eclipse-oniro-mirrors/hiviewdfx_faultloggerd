@@ -235,6 +235,8 @@ std::string DfxSignal::FormatSIGLEAKCodeName(const int32_t signalCode)
             return "JEMALLOC";
         case SIGLEAK_STACK_BADFD:
             return "BADFD";
+        case SIGLEAK_STACK_FILE_DELETE:
+            return "FILE_DELETE";
         default:
             return FormatCommonSignalCodeName(signalCode);
     }
