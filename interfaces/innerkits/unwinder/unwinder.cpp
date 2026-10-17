@@ -1170,31 +1170,59 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     if (stopByFailure) {
         static std::atomic<uint32_t> sProbeCount {0};
         uintptr_t self = (*regs_)[REG_AARCH64_X28];
-        if (self > 0x10000 && (self & 7) == 0 && pid_ > 0 &&
-            sProbeCount.fetch_add(1) < 16) {
+        if (self > 0x10000 && (self & 7) == 0 && pid_ > 0 && sProbeCount.load() < 16) {
             const uintptr_t page = self & ~static_cast<uintptr_t>(0xfff);
             const size_t kBytes = 8192; // covers [page, page+8K): self and the
                                         // tls_/tlsPtr_ neighborhood after it
             uint8_t out[kBytes];
-            bool ok = true;
-            for (size_t i = 0; i < kBytes && ok; i += sizeof(uintptr_t)) {
-                struct iovec local { out + i, sizeof(uintptr_t) };
-                struct iovec remote { reinterpret_cast<void *>(page + i), sizeof(uintptr_t) };
-                if (process_vm_readv(pid_, &local, 1, &remote, 1, 0) !=
-                    static_cast<ssize_t>(sizeof(uintptr_t))) {
-                    ok = false;
+            // One big read first (single syscall); fall back to word-wise only
+            // if the bulk read fails (partially unmapped window).
+            struct iovec localBulk { out, kBytes };
+            struct iovec remoteBulk { reinterpret_cast<void *>(page), kBytes };
+            bool ok = process_vm_readv(pid_, &localBulk, 1, &remoteBulk, 1, 0) ==
+                static_cast<ssize_t>(kBytes);
+            if (!ok) {
+                ok = true;
+                for (size_t i = 0; i < kBytes && ok; i += sizeof(uintptr_t)) {
+                    struct iovec local { out + i, sizeof(uintptr_t) };
+                    struct iovec remote { reinterpret_cast<void *>(page + i), sizeof(uintptr_t) };
+                    if (process_vm_readv(pid_, &local, 1, &remote, 1, 0) !=
+                        static_cast<ssize_t>(sizeof(uintptr_t))) {
+                        ok = false;
+                    }
                 }
             }
             if (ok) {
-                char probePath[96] = {0};
-                if (snprintf_s(probePath, sizeof(probePath), sizeof(probePath) - 1,
-                    "/data/local/tmp/mprobe_%u.bin", sProbeCount.load()) > 0) {
-                    FILE* pf = fopen(probePath, "wb");
-                    if (pf != nullptr) {
-                        fwrite(out, 1, kBytes, pf);
-                        fclose(pf);
-                        DFXLOGW("ManagedProbe: dumped thread=%{private}p to %{public}s",
-                            reinterpret_cast<void *>(self), probePath);
+                // Validate before dumping: a real art::Thread contains the
+                // self-referencing self_ pointer (== x28). In native code x28
+                // is an ordinary callee-saved register (probe v1 dumped JSON
+                // buffers this way) — require the self-reference to accept.
+                bool selfFound = false;
+                for (size_t i = 0; i + sizeof(uintptr_t) <= kBytes; i += sizeof(uintptr_t)) {
+                    uintptr_t v = 0;
+                    if (memcpy_s(&v, sizeof(v), out + i, sizeof(v)) == EOK && v == self) {
+                        selfFound = true;
+                        break;
+                    }
+                }
+                if (selfFound) {
+                    char probePath[96] = {0};
+                    if (snprintf_s(probePath, sizeof(probePath), sizeof(probePath) - 1,
+                        "/data/local/tmp/mprobe_%u.bin", sProbeCount.load()) > 0) {
+                        FILE* pf = fopen(probePath, "wb");
+                        if (pf != nullptr) {
+                            // 16-byte header: magic + self + tid, then the 8K window
+                            const uint32_t magic = 0x4b54534d; // "MSTK"
+                            fwrite(&magic, sizeof(magic), 1, pf);
+                            const uint32_t tid = static_cast<uint32_t>(gettid());
+                            fwrite(&tid, sizeof(tid), 1, pf);
+                            fwrite(&self, sizeof(self), 1, pf);
+                            fwrite(out, 1, kBytes, pf);
+                            fclose(pf);
+                            sProbeCount.fetch_add(1); // quota consumed only on a real dump
+                            DFXLOGW("ManagedProbe: dumped thread=%{private}p to %{public}s",
+                                reinterpret_cast<void *>(self), probePath);
+                        }
                     }
                 }
             }
