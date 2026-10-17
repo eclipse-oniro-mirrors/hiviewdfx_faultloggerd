@@ -338,6 +338,14 @@ private:
     uintptr_t sampleX29_ = 0;
     // FpTailUnwind: pure-FP chain tail from sample x29 (anchor-continuation)
     void FpTailUnwind(void* ctx, size_t maxFrameNum);
+    // StepManaged (M3): live managed-stack walk from art::Thread (x28 SELF).
+    // Offsets proven by disassembly of the container libart: Thread+168 is the
+    // embedded ManagedStack triple {quick@0, link@+8, shadow@+16} (see
+    // managed_walker设计_偏移实锤_20261017.md). Walks the live quick chain —
+    // deep frames are stable across the delay-unwind window (same rationale
+    // as the JIT descriptor freeze, K5); anchor uses physical stack addresses
+    // so the continuation stays valid even though the head may have moved.
+    void StepManaged(void* ctx, size_t maxFrameNum);
     // K12: map-pointer cache for thread-root candidates (libc/ld-musl maps).
     // Frames in those maps are cheap to classify; only they pay a symbol
     // lookup. Untouched when lookup fails (strip/unreachable) = old behavior.
@@ -1043,6 +1051,94 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
 #endif
 }
 
+// M3: managed-stack walk. Reads the LIVE art::Thread (x28 at sample time),
+// takes the quick-chain head from Thread+168 and walks it with the same
+// anchor-continuation rule as FpTailUnwind. Everything is read with
+// process_vm_readv: the Thread object and the current thread stack live in
+// the target process (memory_->Read only sees the captured sample stack /
+// elf files). Timing: the chain is read at unwind time, not at sample time;
+// deep frames (root direction) are stable on the seconds scale, the head
+// may have moved — the physical-address anchor keeps the splice valid.
+void Unwinder::Impl::StepManaged(void* ctx, size_t maxFrameNum)
+{
+#if defined(__aarch64__)
+    (void)ctx;
+    if (frames_.empty() || pid_ <= 0) return;
+    uintptr_t self = (*regs_)[REG_AARCH64_X28];
+    // Conservative plausibility for a container art::Thread*: heap band,
+    // aligned. Anything else (native code clobbers x28) bails out.
+    if (self < 0x5000000000ULL || self >= 0x8000000000ULL || (self & 7) != 0) return;
+    auto rdRemote = [this](uintptr_t addr, uintptr_t* out) {
+        struct iovec local { out, sizeof(uintptr_t) };
+        struct iovec remote { reinterpret_cast<void*>(addr), sizeof(uintptr_t) };
+        return process_vm_readv(pid_, &local, 1, &remote, 1, 0) ==
+            static_cast<ssize_t>(sizeof(uintptr_t));
+    };
+    // self-reference check (art::Thread stores self_; also filters the
+    // self-referential list nodes that fooled probe v2).
+    bool selfFound = false;
+    for (size_t off = 0; off < 512 && !selfFound; off += sizeof(uintptr_t)) {
+        uintptr_t v = 0;
+        if (rdRemote(self + off, &v) && v == self) selfFound = true;
+    }
+    if (!selfFound) return;
+    // ManagedStack triple at Thread+168 (disassembly-proven).
+    uintptr_t msQuick = 0, msLink = 0, msShadow = 0;
+    if (!rdRemote(self + 168, &msQuick) || !rdRemote(self + 176, &msLink) ||
+        !rdRemote(self + 184, &msShadow)) {
+        return;
+    }
+    auto inStack = [](uintptr_t v) {
+        return v >= 0x5f00000000ULL && v < 0x8000000000ULL;
+    };
+    if (msQuick != 0 && !inStack(msQuick)) return;      // fake thread
+    if (msShadow != 0 && (msShadow < 0x5000000000ULL || msShadow >= 0x8000000000ULL)) return;
+    // anchor-continuation, same rule as FpTailUnwind: only frames whose
+    // record lies above the last successful frame's SP are appended.
+    const uintptr_t anchor = frames_.back().sp;
+    size_t budget = maxFrameNum - frames_.size();
+    size_t appended = 0;
+    uintptr_t qf = msQuick;
+    uintptr_t prevQf = 0;
+    while (qf != 0 && qf > prevQf && appended < budget) {
+        uintptr_t nextFp = 0, ra = 0;
+        if (!rdRemote(qf, &nextFp)) break;
+        if (!rdRemote(qf + sizeof(uintptr_t), &ra)) break;
+        if (nextFp == 0 || nextFp <= qf) break;
+        uintptr_t pc = StripPac(ra, pacMask_);
+        DoPcAdjust(pc);
+        if (qf > anchor) {
+            std::shared_ptr<DfxMap> map = nullptr;
+            if (maps_ == nullptr || !maps_->FindMapByAddr(pc, map) ||
+                map == nullptr || !map->IsMapExec()) {
+                break; // garbage pc — stop, don't fabricate frames
+            }
+            StepFrame frame;
+            frame.pc = pc;
+            frame.sp = qf;
+            frame.fp = nextFp;
+            AddFrame(frame, map);
+            appended++;
+            const auto& lastF = frames_.back();
+            if (lastF.map != nullptr) {
+                const std::string& mn = lastF.map->name;
+                if (mn.size() >= 8 && mn.compare(mn.size() - 8, 8, "/libc.so") == 0) {
+                    break; // thread root convention reached
+                }
+            }
+        }
+        prevQf = qf;
+        qf = nextFp;
+    }
+    if (appended > 0) {
+        DFXLOGW("StepManaged: appended %zu frames from live managed chain", appended);
+    }
+#else
+    (void)ctx;
+    (void)maxFrameNum;
+#endif
+}
+
 bool Unwinder::Impl::UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc)
 {
     frame.pc = regs_->GetPc();
@@ -1159,6 +1255,11 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     // non-aarch64, which also keeps stopByFailure used on every platform.)
     if (stopByFailure && sampleX29_ != 0 && !frames_.empty()) {
         FpTailUnwind(ctx, maxFrameNum);
+    }
+    // M3: after the FP tail, try the live managed chain — it crosses the
+    // JNI/nterp barriers that stop the FP walk (chain head sits behind them).
+    if (stopByFailure && !frames_.empty()) {
+        StepManaged(ctx, maxFrameNum);
     }
 #if defined(__aarch64__)
     // Managed-stack probe (prototype, milestone M1): when the chain broke and
