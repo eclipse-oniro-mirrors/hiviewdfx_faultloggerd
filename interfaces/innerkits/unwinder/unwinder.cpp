@@ -980,8 +980,12 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
     size_t appended = 0;
     while (fp != 0 && fp > prevFp && appended < budget) {
         uintptr_t nextFp = 0, nextPc = 0;
-        if (!memory_->Read<uintptr_t>(fp, &nextFp, false)) break;
-        if (!memory_->Read<uintptr_t>(fp + sizeof(uintptr_t), &nextPc, false)) break;
+        // Same idiom as FpStep: first Read with incre=true advances the
+        // cursor past caller_fp, the second reads caller_pc in place.
+        // (Read takes uintptr_t& — never pass an rvalue expression.)
+        uintptr_t ptr = fp;
+        if (!memory_->Read<uintptr_t>(ptr, &nextFp, true)) break;
+        if (!memory_->Read<uintptr_t>(ptr, &nextPc, false)) break;
         if (nextFp == 0 || nextFp <= fp) break;
         nextPc = StripPac(nextPc, pacMask_);
         // Same call-site convention as the main loop: fp records hold the
