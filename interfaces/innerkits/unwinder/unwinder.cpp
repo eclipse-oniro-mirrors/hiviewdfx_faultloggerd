@@ -328,10 +328,13 @@ private:
     // x25(xREFS) captured at Unwind() entry from the perf sample
 #if defined(__aarch64__)
     uintptr_t sampleXRefs_ = 0;
-    // x29(FP) at Unwind() entry — sample true value, immune to
-    // CFI/fallback-chain pollution (speed-profile doc §7 fix)
-    uintptr_t sampleX29_ = 0;
 #endif
+    // x29(FP) at Unwind() entry — sample true value, immune to
+    // CFI/fallback-chain pollution (speed-profile doc §7 fix).
+    // Declared on every platform (the FpTailUnwind call site reads it
+    // unconditionally); only aarch64 fills it in, so on other ports it
+    // stays 0 and the tail call never fires.
+    uintptr_t sampleX29_ = 0;
     // FpTailUnwind: pure-FP chain tail from sample x29 (anchor-continuation)
     void FpTailUnwind(void* ctx, size_t maxFrameNum);
     // K12: map-pointer cache for thread-root candidates (libc/ld-musl maps).
@@ -952,7 +955,6 @@ bool Unwinder::Impl::IsThreadRootFrame()
            (funcName.find("__libc_start_main") != std::string::npos);
 }
 
-#if defined(__aarch64__)
 // FpTailUnwind: walk the pure FP chain from the original sample x29.
 // v2 anchor-continuation design (FpStep_odex doc):
 //   - anchor = frames_.back().sp (last successful frame's SP, always clean
@@ -964,6 +966,7 @@ bool Unwinder::Impl::IsThreadRootFrame()
 //     read failure / frame budget
 void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
 {
+#if defined(__aarch64__)
     if (ctx != nullptr && memory_ != nullptr) {
         memory_->SetCtx(ctx);
     }
@@ -1026,8 +1029,14 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
         DFXLOGU("FpTailUnwind: appended %zu frames (anchor=0x%lx)",
             appended, (uint64_t)anchor);
     }
-}
+#else
+    // Non-aarch64 ports: the FP-chain tail is not implemented; keep the
+    // signature so the (unconditional) call site links and stopByFailure
+    // stays consumed on every platform.
+    (void)ctx;
+    (void)maxFrameNum;
 #endif
+}
 
 bool Unwinder::Impl::UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc)
 {
@@ -1080,8 +1089,8 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     SetLocalStackCheck(ctx, false);
     Clear();
 #if defined(__aarch64__)
-    sampleXRefs_ = (*regs_)[25];
-    sampleX29_ = (*regs_)[29]; // 29: x29(FP) — sample FP chain anchor // 25: x25(xREFS) — perf sample真值,不受CFI链污染
+    sampleXRefs_ = (*regs_)[25]; // 25: x25(xREFS) — perf sample真值,不受CFI链污染
+    sampleX29_ = (*regs_)[29]; // 29: x29(FP) — sample true value, FpTailUnwind chain anchor
 #endif
 
     bool needAdjustPc = false;
@@ -1134,7 +1143,6 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
                 n, sNone.load(), sRaUndef.load(), sIllegal.load(), sMem.load(), sOther.load());
         }
     }
-#if defined(__aarch64__)
     // speed-profile doc §7: when dwarf broke in no-table odex and the
     // fallback chain got polluted, the ART-maintained FP chain from the
     // original sample x29 is still valid. Walk it as ultimate fallback
@@ -1142,10 +1150,11 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     // the last successful frame's SP — no pc comparison, no dedup).
     // Only on failure: a chain that already reached the thread root (or hit
     // the frame budget) has no tail to recover and must not pay the walk.
+    // (Unconditional call: FpTailUnwind itself compiles to a no-op on
+    // non-aarch64, which also keeps stopByFailure used on every platform.)
     if (stopByFailure && sampleX29_ != 0 && !frames_.empty()) {
         FpTailUnwind(ctx, maxFrameNum);
     }
-#endif
     DFXLOGU("Last error code: %{public}d, addr: %{public}p",
         (int)GetLastErrorCode(), reinterpret_cast<void *>(GetLastErrorAddr()));
     DFXLOGU("Last frame size: %{public}zu, last frame pc: %{public}p",
