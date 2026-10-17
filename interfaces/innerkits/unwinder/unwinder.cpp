@@ -980,6 +980,10 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
         if (!memory_->Read<uintptr_t>(fp + sizeof(uintptr_t), &nextPc, false)) break;
         if (nextFp == 0 || nextFp <= fp) break;
         nextPc = StripPac(nextPc, pacMask_);
+        // Same call-site convention as the main loop: fp records hold the
+        // raw return address, the main loop frames store DoPcAdjust-ed pcs,
+        // so keep them comparable for symbolization (offset differs by 4).
+        DoPcAdjust(nextPc);
         // anchor-continuation: skip frames at or above the anchor
         // (already unwound by the main loop); only append deeper frames
         if (fp <= anchor) {
@@ -1083,6 +1087,7 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     bool needAdjustPc = false;
     isResetFrames_ = false;
     lastLrFallbackPc_ = 0;
+    bool stopByFailure = false; // phase-1: FpTailUnwind only on mid-chain failure
     StepFrame frame;
     do {
         if (!isResetFrames_ && (skipFrameNum != 0) && (frames_.size() >= skipFrameNum)) {
@@ -1097,19 +1102,47 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
         }
 
         if (!UnwindFrame(ctx, frame, needAdjustPc)) {
+            stopByFailure = true;
             break;
         }
         if (IsThreadRootFrame()) { // K12: thread root reached, stop unwinding
             break;
         }
     } while (true);
+    // Phase-0 observability: bucket the terminal error code so one hilog grep
+    // separates RA-undefined termination (odex bridge CFI, cause (d)) from
+    // polluted-fp illegal values (cause (a)) and read failures ((a)/(c)).
+    {
+        static std::atomic<uint64_t> sTotal {0}, sNone {0}, sRaUndef {0}, sIllegal {0}, sMem {0}, sOther {0};
+        uint64_t n = sTotal.fetch_add(1) + 1;
+        uint16_t termCode = lastErrorData_.GetCode();
+        if (termCode == 0) {
+            sNone.fetch_add(1);
+        } else if (termCode == UNW_ERROR_RETURN_ADDRESS_UNDEFINED) {
+            sRaUndef.fetch_add(1);
+        } else if (termCode == UNW_ERROR_ILLEGAL_VALUE) {
+            sIllegal.fetch_add(1);
+        } else if (termCode == UNW_ERROR_INVALID_MEMORY) {
+            sMem.fetch_add(1);
+        } else {
+            sOther.fetch_add(1);
+        }
+        if ((n % 500) == 0) {
+            DFXLOGI("UNW_STATS total:%{public}" PRIu64 " none:%{public}" PRIu64
+                    " ra_undef:%{public}" PRIu64 " illegal:%{public}" PRIu64
+                    " memfail:%{public}" PRIu64 " other:%{public}" PRIu64 "",
+                n, sNone.load(), sRaUndef.load(), sIllegal.load(), sMem.load(), sOther.load());
+        }
+    }
 #if defined(__aarch64__)
     // speed-profile doc §7: when dwarf broke in no-table odex and the
     // fallback chain got polluted, the ART-maintained FP chain from the
     // original sample x29 is still valid. Walk it as ultimate fallback
     // (anchor-continuation: only append frames physically deeper than
     // the last successful frame's SP — no pc comparison, no dedup).
-    if (sampleX29_ != 0 && !frames_.empty()) {
+    // Only on failure: a chain that already reached the thread root (or hit
+    // the frame budget) has no tail to recover and must not pay the walk.
+    if (stopByFailure && sampleX29_ != 0 && !frames_.empty()) {
         FpTailUnwind(ctx, maxFrameNum);
     }
 #endif
