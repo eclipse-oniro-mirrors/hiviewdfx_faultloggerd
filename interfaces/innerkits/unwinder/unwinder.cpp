@@ -336,8 +336,21 @@ private:
     // unconditionally); only aarch64 fills it in, so on other ports it
     // stays 0 and the tail call never fires.
     uintptr_t sampleX29_ = 0;
+#if defined(__aarch64__)
+    // libart.so exec base for StepBridge's symbol-offset check (per unwinder
+    // instance = per target pid; ASLR differs between processes).
+    uintptr_t libartBase_ = 0;
+    bool libartBaseFound_ = false;
+#endif
     // FpTailUnwind: pure-FP chain tail from sample x29 (anchor-continuation)
     void FpTailUnwind(void* ctx, size_t maxFrameNum);
+    // StepBridge: deterministic hop out of art_quick_to_interpreter_bridge.
+    // Disassembly (container libart): the bridge saves caller x29/x30 at
+    // [sp+208]/[sp+216] — not the standard frame-record slots — so neither
+    // DWARF (no CFI) nor the plain FP walk finds them; the sample stack
+    // captured them, so the hop needs no live reads. After the hop the quick
+    // chain uses standard records and continues normally.
+    void StepBridge(size_t maxFrameNum);
     // StepManaged (M3): live managed-stack walk from art::Thread (x28 SELF).
     // Offsets proven by disassembly of the container libart: Thread+168 is the
     // embedded ManagedStack triple {quick@0, link@+8, shadow@+16} (see
@@ -1051,6 +1064,92 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
 #endif
 }
 
+// Deterministic hop out of art_quick_to_interpreter_bridge. Offsets from
+// disassembly of the container libart (aarch64):
+//   art_quick_to_interpreter_bridge @ 0x34f5e0, size 0xfc
+//   prologue: sub sp,#224; ...; stp x29, x30, [sp,#208]; bl bridge body
+// The saved pair is the quick caller's real frame record, so after the hop
+// the chain continues over standard records. ART-version coupled: if libart
+// is updated, re-derive via the same one-symbol disassembly.
+void Unwinder::Impl::StepBridge(size_t maxFrameNum)
+{
+#if defined(__aarch64__)
+    constexpr uintptr_t kBridgeOff = 0x34f5e0;
+    constexpr uintptr_t kBridgeSize = 0xfc;
+    constexpr uintptr_t kSavedFpSlot = 208;
+    constexpr uintptr_t kSavedLrSlot = 216;
+    constexpr uintptr_t kBridgeFrameSize = 224;
+    if (frames_.empty() || maps_ == nullptr) return;
+    if (!libartBaseFound_) {
+        libartBaseFound_ = true;
+        for (const auto& m : maps_->GetMaps()) {
+            if (m != nullptr && m->IsMapExec() &&
+                m->name.find("libart.so") != std::string::npos &&
+                m->name.find("libartbase") == std::string::npos &&
+                m->name.find("libartd") == std::string::npos) {
+                libartBase_ = m->begin;
+                break;
+            }
+        }
+    }
+    if (libartBase_ == 0) return;
+    const DfxFrame& last = frames_.back();
+    const uintptr_t pc = static_cast<uintptr_t>(last.pc);
+    const uintptr_t lo = libartBase_ + kBridgeOff;
+    if (pc < lo || pc >= lo + kBridgeSize) return;
+    // Fixed-slot escape: caller fp/lr live in the captured sample stack.
+    const uintptr_t bridgeSp = static_cast<uintptr_t>(last.sp);
+    uintptr_t fpAddr = bridgeSp + kSavedFpSlot;
+    uintptr_t lrAddr = bridgeSp + kSavedLrSlot;
+    uintptr_t callerFp = 0, callerLr = 0;
+    if (!memory_->Read<uintptr_t>(fpAddr, &callerFp, false)) return;
+    if (!memory_->Read<uintptr_t>(lrAddr, &callerLr, false)) return;
+    uintptr_t callerPc = StripPac(callerLr, pacMask_);
+    DoPcAdjust(callerPc);
+    if (callerFp <= bridgeSp || callerPc == 0) return; // implausible
+    std::shared_ptr<DfxMap> map = nullptr;
+    if (!maps_->FindMapByAddr(callerPc, map) || map == nullptr || !map->IsMapExec()) return;
+    StepFrame frame;
+    frame.pc = callerPc;
+    frame.sp = bridgeSp + kBridgeFrameSize;
+    frame.fp = callerFp;
+    AddFrame(frame, map);
+    // The caller is quick code: continue over standard frame records,
+    // same walking rules as FpTailUnwind.
+    uintptr_t fp = callerFp;
+    uintptr_t prevFp = 0;
+    while (fp != 0 && fp > prevFp && frames_.size() < maxFrameNum) {
+        uintptr_t nextFp = 0, nextPc = 0;
+        uintptr_t ptr = fp;
+        if (!memory_->Read<uintptr_t>(ptr, &nextFp, true)) break;
+        if (!memory_->Read<uintptr_t>(ptr, &nextPc, false)) break;
+        if (nextFp == 0 || nextFp <= fp) break;
+        uintptr_t pc2 = StripPac(nextPc, pacMask_);
+        DoPcAdjust(pc2);
+        std::shared_ptr<DfxMap> map2 = nullptr;
+        if (!maps_->FindMapByAddr(pc2, map2) || map2 == nullptr || !map2->IsMapExec()) {
+            break; // garbage pc — stop, don't fabricate frames
+        }
+        StepFrame frame2;
+        frame2.pc = pc2;
+        frame2.sp = fp;
+        frame2.fp = nextFp;
+        AddFrame(frame2, map2);
+        const auto& lf = frames_.back();
+        if (lf.map != nullptr) {
+            const std::string& mn = lf.map->name;
+            if (mn.size() >= 8 && mn.compare(mn.size() - 8, 8, "/libc.so") == 0) {
+                break; // thread root convention reached
+            }
+        }
+        prevFp = fp;
+        fp = nextFp;
+    }
+#else
+    (void)maxFrameNum; // keep the signature linkable on non-aarch64
+#endif
+}
+
 // M3: managed-stack walk. Reads the LIVE art::Thread (x28 at sample time),
 // takes the quick-chain head from Thread+168 and walks it with the same
 // anchor-continuation rule as FpTailUnwind. Everything is read with
@@ -1253,6 +1352,11 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     // the frame budget) has no tail to recover and must not pay the walk.
     // (Unconditional call: FpTailUnwind itself compiles to a no-op on
     // non-aarch64, which also keeps stopByFailure used on every platform.)
+    if (stopByFailure && !frames_.empty()) {
+        // Deterministic bridge hop first (no live reads, uses the captured
+        // stack); FP tail and the managed walk follow for other shapes.
+        StepBridge(maxFrameNum);
+    }
     if (stopByFailure && sampleX29_ != 0 && !frames_.empty()) {
         FpTailUnwind(ctx, maxFrameNum);
     }
