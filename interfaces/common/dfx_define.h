@@ -28,6 +28,7 @@
 #define SIGLEAK_STACK_COREDUMP 3 // When sig = 42, use si_code = 3 mark the event as coredump
 #define SIGLEAK_STACK_ARKTS_ENVSAN 4 // When sig = 42, use si_code = 4 mark the event as arkts_envsan
 #define SIGLEAK_STACK_BADFD 0xbadfd // When sig = 42, use si_code = 0xbadfd mark the event as badfd
+#define SIGLEAK_STACK_FILE_DELETE 5 // When sig = 42, use si_code = 5 mark the event as file delete operation
 #define PROCESSDUMP_TIMEOUT 15
 #define DUMPCATCHER_TIMEOUT 15
 #define COREDUMP_TIMEOUT 30

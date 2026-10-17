@@ -348,4 +348,54 @@ HWTEST_F(ReporterTest, ReportToAMS_NativeProcess_014, TestSize.Level2)
     ASSERT_EQ(request.uid, 0);
     GTEST_LOG_(INFO) << "ReportToAMS_NativeProcess_014: end.";
 }
+
+/**
+ * @tc.name: ReporterTest015
+ * @tc.desc: test SysEventReporter reporting file delete event
+ * @tc.type: FUNC
+ */
+HWTEST_F(ReporterTest, SysEventReporter_FileDelete_015, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "SysEventReporter_FileDelete_015: start.";
+    constexpr int32_t testInodeId = 12345; // 12345 : test inode id
+    SysEventReporter reporter(ProcessDumpType::DUMP_TYPE_FILE_DELETE);
+    pid_t pid = getpid();
+    DfxProcess process;
+    process.InitProcessInfo(pid, pid, getuid(), "test_reporter_filedelete");
+    process.SetReason("Signal:DEBUG SIGNAL(FILE_DELETE) inode_id:12345");
+    ProcessDumpRequest request = {};
+    request.type = ProcessDumpType::DUMP_TYPE_FILE_DELETE;
+    request.pid = pid;
+    request.uid = getuid();
+    request.siginfo.si_signo = SIGLEAK_STACK;
+    request.siginfo.si_code = -SIGLEAK_STACK_FILE_DELETE;
+    request.siginfo.si_value.sival_int = testInodeId;
+    reporter.Report(process, request);
+    ASSERT_TRUE(process.GetReason().find("FILE_DELETE") != string::npos);
+    GTEST_LOG_(INFO) << "SysEventReporter_FileDelete_015: end.";
+}
+
+/**
+ * @tc.name: ReporterTest016
+ * @tc.desc: test FileDeleteReporter with empty reason and null key thread
+ * @tc.type: FUNC
+ */
+HWTEST_F(ReporterTest, FileDeleteReporter_EmptyReason_016, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "FileDeleteReporter_EmptyReason_016: start.";
+    pid_t pid = getpid();
+    DfxProcess process;
+    process.InitProcessInfo(pid, pid, getuid(), "test_filedelete_empty");
+    process.SetReason("");
+    ASSERT_TRUE(process.GetReason().empty());
+    ProcessDumpRequest request = {};
+    request.pid = pid;
+    request.uid = getuid();
+    request.timeStamp = 0;
+    request.siginfo.si_value.sival_int = 0;
+    FileDeleteReporter fileDeleteReporter;
+    fileDeleteReporter.Report(process, request);
+    ASSERT_TRUE(process.GetReason().empty());
+    GTEST_LOG_(INFO) << "FileDeleteReporter_EmptyReason_016: end.";
+}
 }

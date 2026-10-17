@@ -53,6 +53,11 @@ public:
     void Report(DfxProcess& process, const ProcessDumpRequest &request);
 };
 
+class FileDeleteReporter : public Reporter {
+public:
+    void Report(DfxProcess& process, const ProcessDumpRequest &request) override;
+};
+
 void ReportToAbilityManagerService(const DfxProcess& process, const ProcessDumpRequest &request);
 } // namespace HiviewDFX
 } // namespace OHOS

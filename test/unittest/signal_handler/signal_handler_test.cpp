@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <map>
 #include <malloc.h>
@@ -1450,6 +1451,67 @@ HWTEST_F(SignalHandlerTest, SignalHandlerTest026, TestSize.Level2)
         EXPECT_FALSE(file.empty());
     }
     GTEST_LOG_(INFO) << "SignalHandlerTest026: end.";
+}
+
+static void SendFileDeleteDebugSignal(int32_t inodeId)
+{
+    siginfo_t info = {};
+    info.si_signo = SIGLEAK_STACK;
+    info.si_errno = 0;
+    info.si_code = -SIGLEAK_STACK_FILE_DELETE;
+    info.si_value.sival_int = inodeId;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), syscall(SYS_gettid), SIGLEAK_STACK, &info) == -1) {
+        GTEST_LOG_(ERROR) << "send failed errno=" << errno;
+    }
+}
+
+static bool CheckFileDeleteFaultlog(const string& filePath, pid_t pid, int32_t inodeId)
+{
+    if (filePath.empty() || pid <= 0) {
+        return false;
+    }
+    std::list<LineRule> rules;
+    rules.push_back(LineRule(R"(^Build info:.*$)"));
+    rules.push_back(LineRule(R"(^Process name:./test_signalhandler$)"));
+    rules.push_back(LineRule("^Pid:" + to_string(pid) + "$"));
+    rules.push_back(LineRule(R"(^Uid:\d+$)"));
+    rules.push_back(LineRule("^Reason:Signal:DEBUG SIGNAL\\(FILE_DELETE\\).*inode_id:" + to_string(inodeId) + "$"));
+    rules.push_back(LineRule(R"(^#\d+ pc [0-9a-f]+ .*$)", 5)); // match 5 times
+    rules.push_back(LineRule(R"(^Registers:$)"));
+    rules.push_back(LineRule(R"(^FaultStack:$)"));
+    rules.push_back(LineRule(R"(^Maps:$)"));
+    rules.push_back(LineRule(R"(^OpenFiles:$)"));
+    return CheckLineMatch(filePath, rules);
+}
+
+/**
+ * @tc.name: SignalHandlerTest027
+ * @tc.desc: send sig SIGLEAK_STACK_FILE_DELETE with inode id in si_value.sival_int
+ * @tc.type: FUNC
+ */
+HWTEST_F(SignalHandlerTest, SignalHandlerTest027, TestSize.Level2)
+{
+    std::string res = ExecuteCommands("uname");
+    bool linuxKernel = res.find("Linux") != std::string::npos;
+    if (linuxKernel) {
+        ASSERT_TRUE(linuxKernel);
+    } else {
+        constexpr int32_t testInodeId = 12345; // 12345 : test inode id
+        constexpr int32_t dumpWaitSec = 5;     // 5 : seconds the dump target stays alive for ptrace
+        pid_t pid = fork();
+        if (pid < 0) {
+            GTEST_LOG_(ERROR) << "Failed to fork new test process.";
+        } else if (pid == 0) {
+            SendFileDeleteDebugSignal(testInodeId);
+            this_thread::sleep_for(chrono::seconds(dumpWaitSec));
+            _exit(0);
+        } else {
+            auto fileName = WaitCreateCrashFile("stacktrace-filedelete", pid);
+            ASSERT_FALSE(fileName.empty());
+            bool ret = CheckFileDeleteFaultlog(fileName, pid, testInodeId);
+            ASSERT_TRUE(ret);
+        }
+    }
 }
 } // namespace HiviewDFX
 } // namepsace OHOS

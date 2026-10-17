@@ -37,6 +37,7 @@ enum ProcessDumpType : int32_t {
     DUMP_TYPE_COREDUMP,
     DUMP_TYPE_PIPE,
     DUMP_TYPE_ARKTS_ENVSAN,
+    DUMP_TYPE_FILE_DELETE,
 };
 
 /**

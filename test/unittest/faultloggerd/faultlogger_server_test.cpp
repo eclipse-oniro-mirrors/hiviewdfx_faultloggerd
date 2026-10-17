@@ -122,6 +122,23 @@ HWTEST_F(FaultLoggerdServiceTest, LogFileDesClientTest01, TestSize.Level2)
 }
 
 /**
+ * @tc.name: LogFileDesClientTest04
+ * @tc.desc: request a file descriptor for file delete stacktrace through the crash socket.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultLoggerdServiceTest, LogFileDesClientTest04, TestSize.Level2)
+{
+    FaultLoggerdRequest requestData;
+    FillRequestHeadData(requestData.head, FaultLoggerClientType::LOG_FILE_DES_CLIENT);
+    requestData.type = FaultLoggerType::FILE_DELETE_STACKTRACE;
+    requestData.pid = requestData.head.clientPid;
+    int32_t fd{-1};
+    RequestFileDescriptorFromServer(SERVER_CRASH_SOCKET_NAME, &requestData, sizeof(requestData), &fd);
+    SmartFd sFd(fd);
+    ASSERT_GE(sFd.GetFd(), 0);
+}
+
+/**
  * @tc.name: LogFileDesClientTest02
  * @tc.desc: request a file descriptor through a socket not matched.
  * @tc.type: FUNC
