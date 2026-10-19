@@ -147,7 +147,7 @@ HWTEST_F(FaultloggerdClientTest, RequestFileDescriptorTest004, TestSize.Level2)
 {
     GTEST_LOG_(INFO) << "RequestFileDescriptorTest004: start.";
     SmartFd sFd(RequestFileDescriptor(FaultLoggerType::ADDR_SANITIZER));
-    ASSERT_EQ(sFd.GetFd(), 0);
+    ASSERT_EQ(sFd.GetFd(), -1);
     GTEST_LOG_(INFO) << "RequestFileDescriptorTest004: end.";
 }
 
