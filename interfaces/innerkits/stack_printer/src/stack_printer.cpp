@@ -37,6 +37,8 @@ constexpr size_t MAX_SAMPLE_TIDS = 10;
 constexpr int MAX_TID_VALUE = 65536;
 // lperf: max 256 frames/sample * 200Hz * 10s = 512000 unique frames
 constexpr size_t MAX_SAMPLED_FRAMES_PER_TID = 512000;
+// upper bound of timestamps count of a single frame, one timestamp per sample
+constexpr size_t MAX_TIMESTAMPS_PER_FRAME = MAX_SAMPLED_FRAMES_PER_TID;
 }  // namespace
 
 struct StackRecord {
@@ -66,8 +68,16 @@ std::ostream& operator<<(std::ostream& os, const SampledFrame& frame)
 
 std::istream& operator>>(std::istream& is, SampledFrame& frame)
 {
-    size_t timestampsSize;
-    is >> frame.indent >> frame.count >> frame.level >> frame.pc >> frame.isLeaf >> timestampsSize;
+    size_t timestampsSize = 0;
+    if (!(is >> frame.indent >> frame.count >> frame.level >> frame.pc >> frame.isLeaf >> timestampsSize)) {
+        is.setstate(std::ios::failbit);
+        return is;
+    }
+    // timestampsSize comes from an untrusted stream, bound it before resize to avoid huge allocation
+    if (timestampsSize > MAX_TIMESTAMPS_PER_FRAME) {
+        is.setstate(std::ios::failbit);
+        return is;
+    }
     if (timestampsSize > 0) {
         frame.timestamps.resize(timestampsSize);
         for (size_t i = 0; i < timestampsSize; i++) {
