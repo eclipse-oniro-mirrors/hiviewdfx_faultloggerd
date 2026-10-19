@@ -104,6 +104,7 @@ bool DfxMaps::Create(const pid_t pid, std::vector<std::shared_ptr<DfxMap>>& maps
     }
     auto dfxMaps = std::make_shared<DfxMaps>();
     dfxMaps->EnableMapIndex(true);
+    dfxMaps->isFormatPath_ = false; // /proc/<pid>/root 前缀由调用方自行拼接
     if (!dfxMaps->Parse(pid, path)) {
         return false;
     }
