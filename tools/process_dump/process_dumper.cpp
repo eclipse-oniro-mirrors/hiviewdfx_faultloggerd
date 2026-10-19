@@ -38,6 +38,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "binder_record.h"
 #include "reporter.h"
 #include "crash_exception.h"
 #include "process_dump_config.h"
@@ -97,106 +98,6 @@ void SigAlarmCallBack()
     ProcessDumper::GetInstance().ReportSigDumpStats();
 }
 #endif
-
-struct BinderRecord {
-    bool isSync = false;
-    int pid = -1;
-    int nsPid = -1;
-    int tid = -1;
-    int nsTid = -1;
-    std::string cmdLine;
-};
-
-bool ParseBinderRecord(const std::string& line, BinderRecord& binderRecord)
-{
-    auto nsPidStart = line.find("ns:");
-    if (nsPidStart == std::string::npos) {
-        return false;
-    }
-    int nsFromPid = -1;
-    int nsFromTid = -1;
-    constexpr auto binderPidPairParamsSize = 2;
-    if (sscanf_s(line.c_str() + nsPidStart, "ns:%d:%d", &nsFromPid, &nsFromTid) != binderPidPairParamsSize) {
-        return false;
-    }
-    if (nsFromPid == -1 || nsFromTid == -1) {
-        return false;
-    }
-    size_t index = 0;
-    int fromPid = -1;
-    int fromTid = -1;
-    binderRecord.isSync = line.find("async") != 0;
-    for (index = 0; index < line.size(); index++) {
-        if (isdigit(static_cast<unsigned char>(line.at(index)))) {
-            break;
-        }
-    }
-    if (sscanf_s(line.c_str() + index, "%d:%d", &fromPid, &fromTid) != binderPidPairParamsSize) {
-        return false;
-    }
-    if (fromPid == -1 || fromTid == -1) {
-        return false;
-    }
-    ProcStatusInfo procInfo{};
-    int32_t nsRet = RequestProcStatusInfo(fromPid, &procInfo);
-    if (nsRet != ResponseCode::REQUEST_SUCCESS) {
-        DFXLOGW("RequestProcStatusInfo for callerPid %{public}d failed, ret: %{public}d",
-            fromPid, nsRet);
-    }
-    binderRecord.pid = fromPid;
-    binderRecord.nsPid = nsFromPid;
-    binderRecord.tid = fromTid;
-    binderRecord.nsTid = nsFromTid;
-    binderRecord.cmdLine = procInfo.name;
-    return true;
-}
-
-std::vector<BinderRecord> ParseSyncBinderProcInfo(pid_t pid, pid_t tid)
-{
-    std::vector<BinderRecord> records;
-    constexpr auto transactionProcPath = "/proc/transaction_proc";
-    errno = 0;
-    std::ifstream binderFile(transactionProcPath);
-    if (!binderFile.is_open()) {
-        DFXLOGE("Failed to open binder proc file %{public}s, errno:%{public}d", transactionProcPath, errno);
-        return records;
-    }
-    std::string feature = StringPrintf("to %d:%d code", pid, tid);
-    std::string line;
-    while (std::getline(binderFile, line)) {
-        if (line.find("pid") == 0) {
-            break;
-        }
-        if (line.find(feature) == std::string::npos) {
-            continue;
-        }
-        BinderRecord record;
-        if (ParseBinderRecord(line, record)) {
-            records.emplace_back(record);
-        }
-    }
-    return records;
-}
-
-BinderRecord ParseAsyncBinderProcInfo(pid_t callerPid)
-{
-    BinderRecord record{};
-    if (callerPid < 0) {
-        return record;
-    }
-
-    ProcStatusInfo procInfo{};
-    int32_t nsRet = RequestProcStatusInfo(callerPid, &procInfo);
-    if (nsRet != ResponseCode::REQUEST_SUCCESS) {
-        DFXLOGW("RequestProcStatusInfo for callerPid %{public}d failed, ret: %{public}d",
-            callerPid, nsRet);
-        return record;
-    }
-    record.pid = callerPid;
-    record.nsPid = procInfo.nsPid;
-    record.cmdLine = procInfo.name;
-    return record;
-}
 }
 
 ProcessDumper &ProcessDumper::GetInstance()
@@ -255,7 +156,7 @@ DumpErrorCode ProcessDumper::DumpProcess()
         "threadname(%{public}s).",
         request_.siginfo.si_value.sival_int, request_.pid, request_.nsPid, request_.tid, request_.threadName);
     SetProcessdumpTimeout(request_.siginfo);
-    ReadBinderProcInfo();
+    DumpBinderProcInfo();
     DumpErrorCode prepareRes = DumpPreparation();
     if (prepareRes != DumpErrorCode::DUMP_ESUCCESS && prepareRes != DumpErrorCode::DUMP_THREAD_OVER_LIMIT) {
         return prepareRes;
@@ -372,7 +273,7 @@ void ProcessDumper::SetProcessdumpTimeout(siginfo_t &si)
     }
 }
 
-void ProcessDumper::ReadBinderProcInfo()
+void ProcessDumper::DumpBinderProcInfo()
 {
     if (request_.pid <= 0) {
         DFXLOGE("Invalid pid for binder proc info: %{public}d", request_.pid);
@@ -401,14 +302,14 @@ void ProcessDumper::ReadBinderProcInfo()
     } else {
         return;
     }
-    int fd = -1;
-    if (RequestBinderPidsDump(request_.pid, pids.data(), nsPids.data(), pids.size(), &fd) != REQUEST_SUCCESS
-        || fd < 0) {
+    int binderProcInfoFd = -1;
+    auto ret = RequestBinderPidsDump(request_.pid, pids.data(), nsPids.data(), pids.size(), &binderProcInfoFd);
+    if (ret != REQUEST_SUCCESS || binderProcInfoFd < 0) {
         DFXLOGE("Failed to request binder pids dump for pid: %{public}d", request_.pid);
         return;
     }
-    SmartFd sFd(fd);
-    if (write(sFd.GetFd(), recordStringInfo.c_str(), recordStringInfo.size())
+    SmartFd sBinderProcInfoFd(binderProcInfoFd);
+    if (write(sBinderProcInfoFd.GetFd(), recordStringInfo.c_str(), recordStringInfo.size())
         != static_cast<ssize_t>(recordStringInfo.size())) {
         DFXLOGE("Failed write content for pid: %{public}d", request_.pid);
     }

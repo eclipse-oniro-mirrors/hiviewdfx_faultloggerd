@@ -61,6 +61,7 @@ public:
     static int TriggerTrapException();
     static int CrashInLambda();
     static int DoDumpCrash();
+    static int FileDeleteTrigger(const std::string &inodeStr);
     static int TestExitHook();
     static int TestSigHook();
     static int StackCorruption();

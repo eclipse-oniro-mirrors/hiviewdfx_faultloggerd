@@ -152,6 +152,19 @@ HWTEST_F(FaultloggerdClientTest, RequestFileDescriptorEx001, TestSize.Level2)
 }
 
 /**
+ * @tc.name: RequestFileDescriptorEx002
+ * @tc.desc: test RequestFileDescriptor for FILE_DELETE_STACKTRACE type.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestFileDescriptorEx002, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestFileDescriptorEx002: start.";
+    SmartFd sFd(RequestFileDescriptor(FaultLoggerType::FILE_DELETE_STACKTRACE));
+    ASSERT_GT(sFd.GetFd(), 0);
+    GTEST_LOG_(INFO) << "RequestFileDescriptorEx002: end.";
+}
+
+/**
  * @tc.name: RequestSdkDumpTest002
  * @tc.desc: test the function for RequestSdkDump.
  * @tc.type: FUNC
@@ -804,6 +817,20 @@ HWTEST_F(FaultloggerdClientTest, RequestProcStatusInfoTest003, TestSize.Level2)
     int32_t ret = RequestProcStatusInfo(NONEXISTENT_TEST_PID, &info);
     EXPECT_NE(ret, ResponseCode::REQUEST_SUCCESS);
     GTEST_LOG_(INFO) << "RequestProcStatusInfoTest003: end.";
+}
+
+/**
+ * @tc.name: TempFileManagerCreateFileDescriptorFileDeleteTest003
+ * @tc.desc: test CreateFileDescriptor for FILE_DELETE_STACKTRACE type file name prefix
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, TempFileManagerCreateFileDescriptorFileDeleteTest003, TestSize.Level2)
+{
+    std::string filePath;
+    SmartFd fd(TempFileManager::CreateFileDescriptor(
+        FaultLoggerType::FILE_DELETE_STACKTRACE, getpid(), gettid(), GetTimeMilliSeconds(), filePath));
+    ASSERT_GE(fd.GetFd(), 0);
+    EXPECT_TRUE(filePath.find("stacktrace-filedelete") != std::string::npos);
 }
 } // namespace HiviewDFX
 } // namespace OHOS

@@ -178,6 +178,8 @@ int DfxBufferWriter::GetFaultloggerdRequestType()
                 case SIGLEAK_STACK_JEMALLOC:
                 case SIGLEAK_STACK_BADFD:
                     return FaultLoggerType::CPP_STACKTRACE;
+                case SIGLEAK_STACK_FILE_DELETE:
+                    return FaultLoggerType::FILE_DELETE_STACKTRACE;
                 default:
                     return FaultLoggerType::LEAK_STACKTRACE;
             }

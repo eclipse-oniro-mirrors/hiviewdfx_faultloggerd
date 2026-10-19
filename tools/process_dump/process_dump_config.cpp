@@ -94,7 +94,7 @@ void ParseDumpInfoConfig(const cJSON* json, DumpConfig& dumpConfig)
         auto* dumpInfo = cJSON_GetArrayItem(dumpInfos, i);
         int32_t code = GetInt32ValueFromJson(cJSON_GetObjectItem(dumpInfo, "Code"));
         if (code < static_cast<int32_t>(ProcessDumpType::DUMP_TYPE_CPP_CRASH) ||
-            code > static_cast<int32_t>(ProcessDumpType::DUMP_TYPE_ARKTS_ENVSAN)) {
+            code > static_cast<int32_t>(ProcessDumpType::DUMP_TYPE_FILE_DELETE)) {
             DFXLOGE("invalid dump type code: %{public}d", code);
             continue;
         }
@@ -192,6 +192,10 @@ void ProcessDumpConfig::LoadDefaultConfig()
     dumpConfig_.dumpInfo[ProcessDumpType::DUMP_TYPE_ARKTS_ENVSAN] = {
         KEY_THREAD_DUMP_INFO, DUMP_INFO_HEADER, SUBMITTER_STACK,
         REGISTERS, MEMORY_NEAR_REGISTER, FAULT_STACK, MAPS, OPEN_FILES,
+    };
+    dumpConfig_.dumpInfo[ProcessDumpType::DUMP_TYPE_FILE_DELETE] = {
+        KEY_THREAD_DUMP_INFO, DUMP_INFO_HEADER, REGISTERS,
+        MEMORY_NEAR_REGISTER, FAULT_STACK, MAPS, OPEN_FILES,
     };
 }
 

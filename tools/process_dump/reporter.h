@@ -53,6 +53,11 @@ public:
     void Report(DfxProcess& process, const ProcessDumpRequest &request);
 };
 
+class FileDeleteReporter : public Reporter {
+public:
+    void Report(DfxProcess& process, const ProcessDumpRequest &request) override;
+};
+
 #ifdef DFX_UPDATER_PROCESSDUMP
 // The updater variant does not compile reporter.cpp; reporting is a no-op
 // there. Keeping call sites unmodified preserves the mainline function size.

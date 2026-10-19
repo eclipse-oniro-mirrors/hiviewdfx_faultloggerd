@@ -354,4 +354,38 @@ HWTEST_F(DumpInfoHeaderTest, DumpInfoHeaderTest007_FfrtUnknownSpNoFalsePositive,
     GTEST_LOG_(INFO) << "DumpInfoHeaderTest007_FfrtUnknownSpNoFalsePositive: end.";
 }
 #endif
+
+/**
+ * @tc.name: DumpInfoHeaderTest008_FileDeleteInodeId
+ * @tc.desc: file delete dump header prints DEBUG SIGNAL(FILE_DELETE) reason with inode_id
+ * @tc.type: FUNC
+ */
+HWTEST_F(DumpInfoHeaderTest, DumpInfoHeaderTest008_FileDeleteInodeId, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DumpInfoHeaderTest008_FileDeleteInodeId: start.";
+    constexpr int32_t testInodeId = 4321; // 4321 : test inode id
+    pid_t pid = getpid();
+    ProcessDumpRequest request = {};
+    request.type = ProcessDumpType::DUMP_TYPE_FILE_DELETE;
+    request.tid = pid;
+    request.pid = pid;
+    request.nsPid = pid;
+    request.timeStamp = GetTimeMilliSeconds();
+    siginfo_t siginfo = {};
+    siginfo.si_signo = SIGLEAK_STACK;
+    siginfo.si_code = -SIGLEAK_STACK_FILE_DELETE;
+    siginfo.si_value.sival_int = testInodeId;
+    request.siginfo = siginfo;
+
+    DfxProcess process;
+    process.InitProcessInfo(pid, pid, getuid(), "test_process");
+    Unwinder unwinder(pid, pid, false);
+    DumpInfoHeader dumpInfoHeader;
+    dumpInfoHeader.Collect(process, request, unwinder);
+    dumpInfoHeader.Print(process, request, unwinder);
+    ASSERT_TRUE(CheckContent(result, "Reason:Signal:DEBUG SIGNAL(FILE_DELETE)", true));
+    ASSERT_TRUE(CheckContent(result, "inode_id:4321", true));
+    process.Detach();
+    GTEST_LOG_(INFO) << "DumpInfoHeaderTest008_FileDeleteInodeId: end.";
+}
 }

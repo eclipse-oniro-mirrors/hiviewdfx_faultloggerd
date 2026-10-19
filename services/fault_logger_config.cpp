@@ -113,22 +113,10 @@ void ParseDirectoryConfig(const cJSON* json, DirectoryConfig& directoryConfig)
 #endif
 
 #ifdef FAULTLOGGERD_TEST
-void InitFaultloggerTestConfig(DirectoryConfig& directoryConfig)
+namespace {
+std::vector<SingleFileConfig> BuildTestSnapshotFileConfigs()
 {
-    directoryConfig.tempFilePath = "/data/test/faultloggerd/temp";
-    constexpr uint64_t maxTempFilesSize = 10ull << 10; // 10KB
-    directoryConfig.maxTempFilesSize = maxTempFilesSize;
-    constexpr uint32_t fileClearTimeAfterBoot = 3; // 3S
-    directoryConfig.fileClearTimeAfterBoot = fileClearTimeAfterBoot;
-    directoryConfig.singleFileConfigs = {
-        {
-            .type = FaultLoggerType::CPP_CRASH,
-            .fileNamePrefix = "cppcrash",
-            .maxSingleFileSize = 5 << 10, // 5KB
-            .fileExistTime = 60,
-            .keepFileCount = 5,
-            .maxFileCount = 7
-        },
+    return {
         {
             .type = FaultLoggerType::JS_HEAP_SNAPSHOT,
             .fileNamePrefix = "jsheap",
@@ -152,6 +140,43 @@ void InitFaultloggerTestConfig(DirectoryConfig& directoryConfig)
             .fileNamePrefix = "minidump",
         }
     };
+}
+}
+
+void InitFaultloggerTestConfig(DirectoryConfig& directoryConfig)
+{
+    directoryConfig.tempFilePath = "/data/test/faultloggerd/temp";
+    constexpr uint64_t maxTempFilesSize = 10ull << 10; // 10KB
+    directoryConfig.maxTempFilesSize = maxTempFilesSize;
+    constexpr uint32_t fileClearTimeAfterBoot = 3; // 3S
+    directoryConfig.fileClearTimeAfterBoot = fileClearTimeAfterBoot;
+    constexpr int32_t stacktraceFileExistTime = 60; // 60S : exist time of stacktrace test files
+    directoryConfig.singleFileConfigs = {
+        {
+            .type = FaultLoggerType::CPP_CRASH,
+            .fileNamePrefix = "cppcrash",
+            .maxSingleFileSize = 5 << 10, // 5KB
+            .fileExistTime = 60,
+            .keepFileCount = 5,
+            .maxFileCount = 7
+        },
+        {
+            .type = FaultLoggerType::CPP_STACKTRACE,
+            .fileNamePrefix = "stacktrace",
+            .maxSingleFileSize = 5 << 10, // 5KB
+            .fileExistTime = stacktraceFileExistTime,
+            .keepFileCount = 5,
+            .maxFileCount = 7
+        },
+        {
+            .type = FaultLoggerType::FILE_DELETE_STACKTRACE,
+            .fileNamePrefix = "stacktrace-filedelete",
+            .maxSingleFileSize = 5 << 10, // 5KB
+        }
+    };
+    auto snapshotConfigs = BuildTestSnapshotFileConfigs();
+    directoryConfig.singleFileConfigs.insert(directoryConfig.singleFileConfigs.end(),
+        snapshotConfigs.begin(), snapshotConfigs.end());
 }
 #endif
 }

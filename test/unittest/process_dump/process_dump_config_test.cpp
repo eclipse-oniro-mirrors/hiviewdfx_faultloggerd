@@ -112,4 +112,21 @@ HWTEST_F(ProcessDumpConfigTest, ProcessDumpConfigTest002, TestSize.Level2)
     ASSERT_EQ(dumpInfoArktsEnvSan, config.dumpInfo[ProcessDumpType::DUMP_TYPE_ARKTS_ENVSAN]);
     GTEST_LOG_(INFO) << "ProcessDumpConfigTest002: end.";
 }
+
+/**
+ * @tc.name: ProcessDumpConfigTest003
+ * @tc.desc: test process dump config of filedelete
+ * @tc.type: FUNC
+ */
+HWTEST_F(ProcessDumpConfigTest, ProcessDumpConfigTest003, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ProcessDumpConfigTest003: start.";
+    auto config = ProcessDumpConfig::GetInstance().GetConfig();
+    std::vector<std::string> dumpInfoFileDelete = {
+        "KeyThreadDumpInfo", "DumpInfoHeader", "Registers",
+        "MemoryNearRegister", "FaultStack", "Maps", "OpenFiles",
+    };
+    ASSERT_EQ(dumpInfoFileDelete, config.dumpInfo[ProcessDumpType::DUMP_TYPE_FILE_DELETE]);
+    GTEST_LOG_(INFO) << "ProcessDumpConfigTest003: end.";
+}
 }

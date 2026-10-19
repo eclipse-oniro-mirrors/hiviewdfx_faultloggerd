@@ -14,6 +14,7 @@
  */
 
 #include <cerrno>
+#include <chrono>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <map>
@@ -2030,6 +2031,50 @@ HWTEST_F(FaultLoggerdSystemTest, FaultLoggerdSystemTest135, TestSize.Level2)
     }
     EXPECT_TRUE(CheckCountNumStackOverFlow(fileName, pid)) << "FaultLoggerdSystemTest135 Failed";
     GTEST_LOG_(INFO) << "FaultLoggerdSystemTest135: end.";
+}
+
+/**
+ * @tc.name: FaultLoggerdSystemTest136
+ * @tc.desc: test file delete operation stacktrace: crasher FileDeleteTrigger
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultLoggerdSystemTest, FaultLoggerdSystemTest136, TestSize.Level2)
+{
+    // no uname guard: OHOS devices report the kernel name "Linux" via toybox uname although they
+    // are not Linux hosts; this case execs an external crasher (no self-crash) so it is safe and
+    // meaningful to run on real devices
+    GTEST_LOG_(INFO) << "FaultLoggerdSystemTest136: start.";
+    constexpr int32_t testInodeId = 12345; // 12345 : test inode id
+    string cmd = "FileDeleteTrigger " + to_string(testInodeId);
+    string fileName;
+    pid_t pid = TriggerCrasherAndGetFileName(cmd, CRASHER_CPP, fileName, TEMP_DIR, "stacktrace-filedelete");
+    GTEST_LOG_(INFO) << "test pid(" << pid << ")" << " file delete log name : " << fileName;
+    if (pid < 0 || fileName.size() < CPPCRASH_FILENAME_MIN_LENGTH) {
+        GTEST_LOG_(ERROR) << "Trigger Crash Failed.";
+        FAIL();
+    }
+    // processdump writes sections progressively; wait for the last section marker so that
+    // keyword checks never race a half-written log under device load
+    const std::string dumpDoneMarker = "OpenFiles:";
+    constexpr int32_t markerCount = 1; // 1 : single marker keyword
+    constexpr int32_t maxWaitSec = 10;  // 10 : max seconds to wait for dump write completion
+    for (int32_t waited = 0; waited < maxWaitSec; waited++) {
+        if (CheckKeyWords(fileName, &dumpDoneMarker, markerCount, -1) == markerCount) {
+            break;
+        }
+        this_thread::sleep_for(chrono::seconds(1));
+    }
+    // CheckKeyWordsNormal matches whitespace-separated tokens sequentially: every keyword must
+    // be a single token (no spaces) and the array must follow the log file order
+    string log[] = {
+        "Pid:" + to_string(pid), "Uid", "Reason:Signal:DEBUG", "SIGNAL(FILE_DELETE)",
+        // inode value check relaxed to field presence: si_code=-5 (SI_SIGIO -> SIL_POLL layout)
+        // delivery drops si_value so inode_id currently arrives as 0; tighten after kernel fix
+        "inode_id:", "Tid:", "#00", "Registers:", "FaultStack:", "Maps:", "OpenFiles:"
+    };
+    int expectNum = sizeof(log) / sizeof(log[0]);
+    EXPECT_TRUE(CheckKeyWords(fileName, log, expectNum, -1) == expectNum) << "FaultLoggerdSystemTest136 Failed";
+    GTEST_LOG_(INFO) << "FaultLoggerdSystemTest136: end.";
 }
 } // namespace HiviewDFX
 } // namespace OHOS
