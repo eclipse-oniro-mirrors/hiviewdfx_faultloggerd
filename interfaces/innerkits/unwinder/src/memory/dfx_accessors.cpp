@@ -41,8 +41,8 @@ namespace {
 static const int FOUR_BYTES = 4;
 static const int EIGHT_BYTES = 8;
 static const int THIRTY_TWO_BITS = 32;
-constexpr size_t DEFAULT_PAGE_SIZE = 4096; // 4096 : fallback when sysconf fails
-constexpr size_t PAGE_CACHE_SLOTS = 8; // 8 : direct-mapped page cache slots
+constexpr size_t DEFAULT_PAGE_SIZE = 4096; // 4096:sysconf 失败时的兜底值
+constexpr size_t PAGE_CACHE_SLOTS = 8; // 8:直接映射式页缓存槽数
 }
 
 bool DfxAccessors::GetMapByPcAndCtx(uintptr_t pc, std::shared_ptr<DfxMap>& map, void *arg)
@@ -228,7 +228,7 @@ bool DfxAccessorsRemote::ReadByVmReadv(uintptr_t addr, uintptr_t *val, pid_t pid
 
     size_t offset = static_cast<size_t>(addr & (pageSize_ - 1));
     if (offset + sizeof(uintptr_t) > pageSize_) {
-        // Unaligned access crossing the page tail: one direct read, no caching.
+        // 跨页尾的非对齐访问:直接读一次,不缓存。
         return ReadProcMemByPid(pid, addr, val, sizeof(uintptr_t)) == sizeof(uintptr_t);
     }
 
@@ -236,10 +236,9 @@ bool DfxAccessorsRemote::ReadByVmReadv(uintptr_t addr, uintptr_t *val, pid_t pid
     size_t slotIdx = static_cast<size_t>((pageBase / pageSize_) % PAGE_CACHE_SLOTS);
     PageSlot &slot = pageCache_[slotIdx];
     if (slot.base != pageBase || slot.validLen < offset + sizeof(uintptr_t)) {
-        // Prefetch the whole page in one process_vm_readv based call. Transfers
-        // are all-or-nothing per iovec, so a page with an unmapped tail fails
-        // as a whole; retry just the requested word (no caching) to keep the
-        // failure granularity identical to a single PEEKDATA.
+        // 一次基于 process_vm_readv 的调用预取整页。iovec 传输要么全成
+        // 要么全败,页尾未映射会让整页读失败;此时只重读请求的那个字
+        // (不缓存),保持与单次 PEEKDATA 一致的失败粒度。
         size_t bytes = ReadProcMemByPid(pid, pageBase, slot.data.data(), pageSize_);
         if (bytes < offset + sizeof(uintptr_t)) {
             slot.base = 0;

@@ -37,8 +37,8 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
     DFX_TRACE_SCOPED_DLSYM("DwarfEntryParserLinearSearchEntry");
     uintptr_t tableData = uti.tableData;
     *cachedFde = nullptr;
-    // F19: disambiguate sections whose tableData is a bare file offset
-    // (.debug_frame); eh_frame tableData is an address and needs no id.
+    // F19:区分 tableData 只是裸文件偏移的 section(.debug_frame);
+    // eh_frame 的 tableData 是地址,无需附加标识。
     const uintptr_t mmapId = uti.isDebugFrame
         ? reinterpret_cast<uintptr_t>(uti.debugFrameMmap.get()) : 0;
 
@@ -47,18 +47,17 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
         pc -= uti.oatExecutableOffset;
     }
 
-    // F8(.1): small sections (per-method JIT ELFs are the common case) are
-    // cheaper to scan directly than to index; indexing thousands of one-shot
-    // sections also thrashed the cache and evicted hot DSO indexes.
-    // tableLen is an FDE count only on the known-count eh_frame_hdr path;
-    // .debug_frame sections (JIT ELFs, odex miniDebugInfo) carry ~0UL, so the
-    // small test must also accept the section byte span.
+    // F8(.1):小 section(按方法生成的 JIT ELF 是常态)直接扫比建索引
+    // 更便宜;给成千上万一次性 section 建索引还会抖掉缓存里热的 DSO
+    // 索引。tableLen 仅在已知 FDE 数的 eh_frame_hdr 路径下才是计数;
+    // .debug_frame section(JIT ELF、odex miniDebugInfo)带的是 ~0UL,
+    // 所以"小"的判定还须接受按字节跨度。
     constexpr uintptr_t kSmallSectionFdeCount = 64;
     constexpr uintptr_t kSmallSectionBytes = 8 * 1024;
     uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
-    // byte-span test is only sound for .debug_frame sections, where tableData
-    // and debugFrameEnd are offsets in the same mmap; endPc is a pc-range
-    // value unrelated to tableData, so never span-test the eh_frame path.
+    // 字节跨度判定只对 .debug_frame 成立:其 tableData 与 debugFrameEnd 是
+    // 同一 mmap 内的偏移;endPc 是 pc 区间值、与 tableData 无量纲关系,
+    // eh_frame 路径绝不做跨度判定。
     bool smallSection = (uti.tableLen < kSmallSectionFdeCount);
     if (!smallSection && uti.isDebugFrame && uti.debugFrameEnd > tableData &&
         (uti.debugFrameEnd - tableData) < kSmallSectionBytes) {
@@ -81,8 +80,8 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
                     return true;
                 }
             } else {
-                // tolerate bad entry: GetCieOrFde advanced ptr to entry end.
-                // guard against no-progress/backward move and runaway skipping.
+                // 容忍坏表项:GetCieOrFde 已把 ptr 推进到表项末尾。
+                // 防御原地不动/倒退以及无限连跳。
                 if (ptr <= fdeAddr) {
                     break;
                 }
@@ -95,9 +94,8 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
         return false;
     }
 
-    // section indexes are cached (true LRU, F8: hit promotes to front):
-    // stack walks alternate modules, so a FIFO cache thrashed on >8 hot
-    // sections and rebuilt indexes repeatedly.
+    // section 索引带缓存(真 LRU,F8:命中即提到队首):栈回溯在模块间
+    // 交替,FIFO 缓存在 8 个以上热 section 时会反复抖动、反复重建索引。
     const std::vector<FdeIndexEntry>* index = nullptr;
     for (auto it = fdeIndexCache_.begin(); it != fdeIndexCache_.end(); ++it) {
         if (it->tableData == tableData && it->mmapId == mmapId) {
@@ -114,9 +112,8 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
     if (index == nullptr || index->empty()) {
         return false;
     }
-    // sorted by pcEnd: first candidate whose pcEnd > pc, then scan forward
-    // for a covering range (pcStart <= pc < pcEnd). scan is bounded so a
-    // pathological section cannot stall the unwind.
+    // 按 pcEnd 排序:先二分出第一个 pcEnd > pc 的候选,再向前找覆盖
+    // 区间(pcStart <= pc < pcEnd)。扫描有界,病态 section 拖不死回溯。
     auto it = std::upper_bound(index->begin(), index->end(), pc,
         [](uintptr_t value, const FdeIndexEntry& entry) { return value < entry.pcEnd; });
     size_t scanned = 0;
@@ -124,7 +121,7 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
         if (pc >= it->pcStart && pc < it->pcEnd) {
             DFXLOGU("Fde entry addr by index: %{public}" PRIx64 "", (uint64_t)it->fdeAddr);
             uei.unwindInfo = (void *)(it->fdeAddr);
-            *cachedFde = it->entry; // F6: null falls back to ParseFde in Step
+            *cachedFde = it->entry; // F6:为空时 Step 里退回 ParseFde
             uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
             return true;
         }
@@ -140,9 +137,9 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
     uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
     const uintptr_t mmapId = uti.isDebugFrame
         ? reinterpret_cast<uintptr_t>(uti.debugFrameMmap.get()) : 0;
-    constexpr size_t maxSectionEntries = 512 * 1024; // guard against bogus fdeCount
+    constexpr size_t maxSectionEntries = 512 * 1024; // 防御伪造的 fdeCount
     constexpr size_t maxCachedSections = 32;
-    constexpr size_t maxTotalEntries = 1024 * 1024;  // bound cache memory (~24MB)
+    constexpr size_t maxTotalEntries = 1024 * 1024;  // 限制缓存内存(约 24MB)
 
     std::vector<FdeIndexEntry> entries;
     uintptr_t i = 0;
@@ -151,8 +148,8 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
     FrameDescEntry fdeInfo;
     while (i++ < fdeCount && ptr < endBoundary && entries.size() < maxSectionEntries) {
         uintptr_t fdeAddr = ptr;
-        // inline entry walk (same semantics as GetCieOrFde, but collects fde
-        // ranges instead of querying one pc; bad entries are skipped, not fatal)
+        // 内联走表项(语义同 GetCieOrFde,但收集全部 fde 区间而非查单个
+        // pc;坏表项跳过,不致命)
         uintptr_t entryPtr = ptr;
         bool isCieEntry = false;
         ParseCieOrFdeHeader(entryPtr, fdeInfo, isCieEntry);
@@ -166,9 +163,9 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
         if (ok) {
             consecutiveSkips = 0;
             if (!isCieEntry && fdeInfo.pcEnd > fdeInfo.pcStart) {
-                // F6: ParseFde just cached this fde; unordered_map nodes are
-                // address-stable and indexed entries are never erased (a
-                // cached ParseFde returns before the erase-on-fail path).
+                // F6:ParseFde 刚把该 fde 写入缓存;unordered_map 节点地址
+                // 稳定,且被索引的表项永不删除(命中缓存的 ParseFde 直接
+                // 返回,走不到失败删除路径)。
                 const FrameDescEntry* parsed = nullptr;
                 auto cached = fdeEntries_.find(fdeAddr);
                 if (cached != fdeEntries_.end()) {
@@ -177,7 +174,7 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
                 entries.push_back({fdeInfo.pcStart, fdeInfo.pcEnd, fdeAddr, parsed});
             }
         } else {
-            // tolerate: advance to entry end so collection can continue
+            // 容忍:推进到表项末尾,收集得以继续
             if (entryEnd <= fdeAddr) {
                 break;
             }
@@ -287,9 +284,9 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
     }
     memory_->SetDataOffset(uti.segbase);
 
-    // F6: index hit carries the parsed entry; skip ParseFde entirely (its
-    // cache find was the top self-time hotspot: hash mod + bucket walk +
-    // deep copy, ~41% of post-pass under heavy app load).
+    // F6:索引命中自带已解析表项,完全跳过 ParseFde(它的缓存查找是
+    // self-time 头号热点:哈希取模+桶遍历+深拷贝,重应用负载下约占
+    // 后处理 41%)。
     FrameDescEntry localFdeInfo;
     const FrameDescEntry* fdePtr = cachedFde;
     if (fdePtr == nullptr) {
@@ -316,19 +313,15 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
         return false;
     }
 
-    // Epilogue ret handling: when the pc is at the function's ret
-    // instruction (last 4 bytes of the FDE range), the epilogue has
-    // already restored x29(fp) and x30(lr) to the caller's values.
-    // CFA rules that reference fp now compute a wrong CFA from the
-    // restored (caller's) fp, causing register saves to be read from
-    // wrong stack addresses. Instead of trying to correct the CFA,
-    // return false here so UpdateRegsState takes the fallback path:
-    //   - LR fallback: x30 already holds the correct return address
-    //     (loaded by the epilogue's ldp), giving the right next pc.
-    //   - FpStep: fp already holds the caller's fp, giving the correct
-    //     frame chain for subsequent unwinding.
-    // Both fallbacks use register values that are valid precisely
-    // because the epilogue has completed its restores.
+    // 尾序 ret 处理:pc 落在函数 ret 指令处(FDE 区间最后 4 字节)时,
+    // 尾序已把 x29(fp)、x30(lr) 恢复成调用者的值。引用 fp 的 CFA 规则
+    // 此时会用恢复后的(调用者的)fp 算出错误 CFA,寄存器保存值便从错误
+    // 栈地址读取。与其修正 CFA,不如在此返回 false,让 UpdateRegsState
+    // 走兜底路径:
+    //   - LR 兜底:x30 已持有正确返回地址(尾序的 ldp 已加载),得到
+    //     正确的下一 pc。
+    //   - FpStep:fp 已是调用者的 fp,后续回溯拿到正确帧链。
+    // 两个兜底用的寄存器值之所以有效,恰因尾序已完成恢复。
     if (checkPc + 4 >= fdeInfo.pcEnd) {
         DFXLOGU("Epilogue ret: deferring to LR/FP fallback, pc: 0x%{public}" PRIx64, (uint64_t)pc);
         memory_ = originalMemory;
@@ -356,7 +349,7 @@ bool DwarfEntryParser::GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo)
     if (isCieEntry) {
         if (!ParseCie(addr, ptr, fdeInfo.cie)) {
             DFXLOGE("Failed to Parse CIE?");
-            // tolerate: advance to entry end so linear scan can skip this entry
+            // 容忍:推进到表项末尾,线性扫描得以跳过该表项
             addr = entryEnd;
             return false;
         }
@@ -368,7 +361,7 @@ bool DwarfEntryParser::GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo)
                 DFXLOGE("Failed to Parse FDE? addr: 0x%{public}" PRIx64 ", total: %{public}" PRIx64 "",
                     (uint64_t)addr, failCnt.load());
             }
-            // tolerate: advance to entry end so linear scan can skip this entry
+            // 容忍:推进到表项末尾,线性扫描得以跳过该表项
             addr = entryEnd;
             return false;
         }
@@ -430,11 +423,10 @@ bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEn
             return true;
         }
     }
-    // R4 (F7: checked after the success cache so hot steps take no lock):
-    // remember conclusively failed fdes (keyed with section base at failure
-    // time) so repeated lookups skip the full parse; bounded to avoid growth.
-    // s_failedFdes and fdeEntries_ are disjoint: the fail path erases the
-    // success entry before recording the failure.
+    // R4(F7:放在成功缓存之后,热步进不取锁):记下确定性失败的 fde
+    // (以失败时刻的 section 基址为键),重复查找即可跳过完整解析;
+    // 有界防膨胀。s_failedFdes 与 fdeEntries_ 互斥:失败路径先删成功
+    // 表项再记失败。
     static std::mutex s_failMutex;
     static std::unordered_map<uintptr_t, uintptr_t> s_failedFdes;
     {
@@ -475,8 +467,8 @@ bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEn
 bool DwarfEntryParser::FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo)
 {
     if (!ParseCie(fdeInfo.cieAddr, fdeInfo.cieAddr, fdeInfo.cie)) {
-        // R2: some producers emit debug_frame style absolute cie pointer inside
-        // an eh_frame section; retry with absolute convention before giving up.
+        // R2:部分生成器在 eh_frame 里发出 debug_frame 风格的绝对 cie
+        // 指针;放弃前先按绝对约定重试一次。
         uintptr_t altCieAddr = entriesOffset_ + fdeInfo.ciePtrValue;
         if (!isDebugFrame_ && altCieAddr != fdeInfo.cieAddr &&
             altCieAddr >= entriesOffset_ && altCieAddr < ptr &&
@@ -657,8 +649,8 @@ bool DwarfEntryParser::FillInCie(uintptr_t ptr, CommonInfoEntry& cieInfo)
         ParseAugData(ptr, cieInfo, augStr);
         return true;
     }
-    // legacy augmentation without length prefix: parse known chars inline,
-    // stop at unknown char (instructions offset then stays at current ptr).
+    // 无长度前缀的旧式 augmentation:内联解析已知字符,遇未知字符即停
+    // (instructions 偏移随之停在当前 ptr)。
     for (size_t i = 0; i < augStr.size(); ++i) {
         switch (augStr[i]) {
             case 'P': {
@@ -677,7 +669,7 @@ bool DwarfEntryParser::FillInCie(uintptr_t ptr, CommonInfoEntry& cieInfo)
                 cieInfo.isSignalFrame = true;
                 break;
             default:
-                i = augStr.size(); // stop scanning
+                i = augStr.size(); // 停止扫描
                 break;
         }
     }

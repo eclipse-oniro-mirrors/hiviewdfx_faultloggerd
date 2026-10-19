@@ -57,6 +57,9 @@ public:
     uint64_t GetStartVaddr();
     uint64_t GetEndVaddr();
     bool IsValidPc(uint64_t pc);
+    // JIT ELF 专用:记录 .text/符号的绝对运行时地址区间(ART JIT ELF 的
+    // sh_addr/st_value 本就是运行时地址)。设置后 IsValidPc 与
+    // FindUnwindTableInfo 按该区间判定,不再叠加 loadBase。
     void SetRuntimeRange(uint64_t start, uint64_t end)
     {
         runtimeStart_ = start;

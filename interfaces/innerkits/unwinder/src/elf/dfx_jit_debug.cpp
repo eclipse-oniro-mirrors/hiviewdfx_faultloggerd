@@ -36,16 +36,16 @@ namespace {
 #define LOG_TAG "DfxJitDebug"
 
 constexpr const char* JIT_DEBUG_DESCRIPTOR = "__jit_debug_descriptor";
-// V1 layout (no Android-specific fields) covers up to (but excluding) `timestamp`:
-//   next + prev + symfileAddr + symfileSize = 4 * sizeof(uint64_t) = 32 bytes on 64-bit.
-// V2 layout (Android "Android2" magic) adds timestamp + seqlock + padding = sizeof(JitCodeEntry).
-// Using offsetof/sizeof keeps the constants correct for the host pointer size.
+// V1 布局(无 Android 扩展字段)截止到 timestamp 之前:
+//   next + prev + symfileAddr + symfileSize = 4 * sizeof(uint64_t),64 位下 32 字节。
+// V2 布局(Android "Android2" 魔数)增加 timestamp + seqlock + 填充 = sizeof(JitCodeEntry)。
+// 用 offsetof/sizeof 定义常量,保证在宿主机任意指针宽度下都正确。
 constexpr size_t DESCRIPTOR_SIZE_V1 = 24;  // version + action_flag + relevant_entry + first_entry
-constexpr size_t DESCRIPTOR_SIZE_V2 = 56;  // V1 + Android-specific magic/flags/sizes/seqlock/timestamp
+constexpr size_t DESCRIPTOR_SIZE_V2 = 56;  // V1 + Android 扩展的 magic/flags/sizes/seqlock/timestamp
 constexpr size_t CODE_ENTRY_SIZE_V1 = offsetof(JitCodeEntry, timestamp);
 constexpr size_t CODE_ENTRY_SIZE_V2 = sizeof(JitCodeEntry);
 
-// JIT descriptor is registered in ART runtime, only search these libs.
+// JIT 描述符注册在 ART 运行时里,只在下面这些库中搜索。
 const std::vector<std::string>& GetSearchLibs()
 {
     static const std::vector<std::string> searchLibs = {"libart.so", "libartd.so"};
@@ -115,9 +115,9 @@ bool DfxJitDebug::ReadMemory(uint64_t addr, void* buf, size_t size)
     if (buf == nullptr || size == 0) {
         return false;
     }
-    // For remote processes, use ReadProcMemByPid which reads /proc/pid/mem directly.
-    // This is necessary because DfxMemory::Read may try to read from ELF mmap first,
-    // which fails for .bss sections (not in the ELF file).
+    // 远程进程直接用 ReadProcMemByPid 读 /proc/pid/mem。必须如此:
+    // DfxMemory::Read 会先尝试从 ELF mmap 读,而 .bss 段不在 ELF 文件里,
+    // 那样读会失败。
     if (pid_ > 0 && pid_ != getpid()) {
         size_t read = ReadProcMemByPid(pid_, addr, buf, size);
         if (read == size) {
@@ -127,7 +127,7 @@ bool DfxJitDebug::ReadMemory(uint64_t addr, void* buf, size_t size)
             pid_, addr, read, size);
         return false;
     }
-    // For local process, use DfxMemory::Read
+    // 本进程则用 DfxMemory::Read。
     if (memory_ == nullptr) {
         return false;
     }
@@ -145,6 +145,7 @@ bool DfxJitDebug::ReadU32(uint64_t addr, uint32_t* val)
     return ReadMemory(addr, val, sizeof(*val));
 }
 
+// 去掉 ARM64 MTE/TBI 的高位地址标签(保留低 56 位)。
 uint64_t DfxJitDebug::StripAddressTag(uint64_t addr)
 {
     if (arch_ == ARCH_ARM64) {
@@ -153,6 +154,7 @@ uint64_t DfxJitDebug::StripAddressTag(uint64_t addr)
     return addr;
 }
 
+// 本进程:dlsym 直接取 __jit_debug_descriptor 地址。
 bool DfxJitDebug::FindJitDescriptorLocal()
 {
     void* addr = dlsym(RTLD_DEFAULT, JIT_DEBUG_DESCRIPTOR);
@@ -187,11 +189,10 @@ DfxJitDebug::JitDescriptorStatus DfxJitDebug::FindJitDescriptor()
             continue;
         }
 
-        // The ELF header map (read-only, offset 0) of libart.so/libartd.so:
-        // its begin is the runtime address of vaddr 0, so a symbol with vaddr
-        // V lives at mapZero->begin + V. The descriptor may sit in any
-        // following mapping of the image (relro page or the anonymous .bss
-        // tail with an empty name), so resolve the containing map by address.
+        // libart.so/libartd.so 的 ELF 头映射(只读、offset 0):其 begin 即
+        // vaddr 0 的运行时地址,故 vaddr 为 V 的符号位于 mapZero->begin + V。
+        // 描述符可能落在该映像随后的任意映射里(relro 页或无名的匿名 .bss
+        // 尾部),所以要按地址反查所属 map。
         if (map->prots == PROT_READ && map->offset == 0 && !IsBlankMap(map) &&
             !map->name.empty() && Searchable(map->name)) {
             mapZero = map;
@@ -250,6 +251,8 @@ bool DfxJitDebug::EnsureJitDescriptorLocked()
     return false;
 }
 
+// 读取并识别描述符版本:magic 为 "Android2" 走 V2 表项(含 seqlock),
+// 否则按 V1(无 seqlock)处理。
 bool DfxJitDebug::ReadDescriptor()
 {
     JitDescriptor desc{};
@@ -281,6 +284,8 @@ bool DfxJitDebug::ReadDescriptor()
     return true;
 }
 
+// 双读 + seqlock 校验读取链表指针字段:读两次目标字段并核对所指表项的
+// seqlock,两次不一致或 seqlock 为奇数(写入进行中)即判定发生竞争。
 bool DfxJitDebug::ReadNextField(uint64_t fieldAddr, JitUID* uid, bool* race)
 {
     uint64_t address[2] = {0, 0};
@@ -315,6 +320,7 @@ bool DfxJitDebug::ReadNextField(uint64_t fieldAddr, JitUID* uid, bool* race)
     return true;
 }
 
+// 复核表项 seqlock 未变:读取 ELF 期间目标可能已被 ART 回收重写。
 bool DfxJitDebug::CheckSeqlock(const JitUID& uid, bool* race)
 {
     if (seqlockOffset_ == 0) {
@@ -371,12 +377,12 @@ bool DfxJitDebug::LoadJitElf(uint64_t addr, uint64_t size, std::shared_ptr<DfxEl
 
     ShdrInfo textShdr;
     if (elf->GetSectionInfo(textShdr, ".text") && textShdr.size != 0) {
-        // ART/ets_runtime JIT ELFs store the absolute runtime address of the .text bytes
-        // in sh_addr (e.g. for ART it is the address inside the JIT code cache, and for
-        // ets_runtime it is `symfile_addr + sh_offset`). Either way sh_addr is already
-        // the runtime PC, so we must NOT add `addr` (symfile_addr) again. Setting
-        // loadBase to 0 keeps IsValidPc/FindUnwindTableInfo consistent with this layout
-        // (matches the libunwindstack reference, which never adds symfile_addr).
+        // ART/ets_runtime 的 JIT ELF 把 .text 字节的绝对运行时地址存在
+        // sh_addr(ART 里是 JIT 代码缓存内的地址,ets_runtime 里是
+        // symfile_addr + sh_offset)。无论哪种,sh_addr 已是运行时 PC,
+        // 绝不能再加 addr(symfile_addr)。loadBase 置 0 使
+        // IsValidPc/FindUnwindTableInfo 与该布局保持一致(对齐
+        // libunwindstack 参考实现,从不加 symfile_addr)。
         uint64_t runtimeStart = textShdr.addr;
         uint64_t runtimeEnd = runtimeStart + textShdr.size;
         elf->SetRuntimeRange(runtimeStart, runtimeEnd);
@@ -394,8 +400,8 @@ bool DfxJitDebug::LoadJitElf(uint64_t addr, uint64_t size, std::shared_ptr<DfxEl
             }
         }
         if (minAddr != static_cast<uint64_t>(-1) && maxAddr != 0) {
-            // Symbol values in JIT ELFs are also absolute runtime addresses (verified
-            // against ART JIT samples), so no need to add `addr`.
+            // JIT ELF 的符号值同样是绝对运行时地址(经 ART JIT 样本实证),
+            // 无需再加 addr。
             uint64_t runtimeStart = minAddr;
             uint64_t runtimeEnd = maxAddr;
             elf->SetRuntimeRange(runtimeStart, runtimeEnd);
@@ -403,15 +409,13 @@ bool DfxJitDebug::LoadJitElf(uint64_t addr, uint64_t size, std::shared_ptr<DfxEl
             DFXLOGU("Loaded JIT ELF: addr=0x%{public}" PRIx64 ", size=%{public}" PRIu64 ", symRange=[0x%{public}" PRIx64 ", 0x%{public}" PRIx64 "), runtime=[0x%{public}" PRIx64 ", 0x%{public}" PRIx64 ")",
                 addr, size, minAddr, maxAddr, runtimeStart, runtimeEnd);
         } else {
-            // Fallback: use PT_LOAD segments to derive the runtime range.
-            // ART JIT ELFs typically carry .text with sh_size=0 (the code lives in the
-            // JIT code cache, not inside the ELF file) and symbols with st_size=0, so
-            // the .text/symbol approaches above do not yield a range. However the
-            // PT_LOAD segments have p_vaddr set to the absolute runtime address of the
-            // JIT code (see libunwindstack ElfInterface::IsValidPc, which matches the
-            // PC against [p_vaddr, p_vaddr + p_memsz)). Use that range here so that
-            // IsValidPc/FindUnwindTableInfo can match the PC without relying on
-            // section headers or symbols.
+            // 兜底:用 PT_LOAD 段推算运行时区间。ART JIT ELF 常见 .text 的
+            // sh_size=0(代码在 JIT 代码缓存里,不在 ELF 文件内)、符号
+            // st_size=0,上面两条路都得不到区间;但 PT_LOAD 的 p_vaddr 存的
+            // 是 JIT 代码的绝对运行时地址(参见 libunwindstack
+            // ElfInterface::IsValidPc,用 [p_vaddr, p_vaddr + p_memsz) 匹配
+            // PC)。取该区间后,IsValidPc/FindUnwindTableInfo 匹配 PC 便
+            // 无需依赖节头或符号。
             const auto& ptLoads = elf->GetPtLoads();
             uint64_t ptStart = static_cast<uint64_t>(-1);
             uint64_t ptEnd = 0;
@@ -437,6 +441,8 @@ bool DfxJitDebug::LoadJitElf(uint64_t addr, uint64_t size, std::shared_ptr<DfxEl
     return true;
 }
 
+// 沿链表读取新表项:从描述符 firstEntry 出发逐项走 next 指针,
+// 逐项 seqlock 校验,已缓存的 ELF 直接复用,新表项现场加载。
 bool DfxJitDebug::ReadNewEntries(std::map<JitUID, std::shared_ptr<DfxElf>>* entries, bool* race)
 {
     JitUID uid;
@@ -489,6 +495,9 @@ bool DfxJitDebug::ReadNewEntries(std::map<JitUID, std::shared_ptr<DfxElf>>* entr
     return true;
 }
 
+// 重试到一轮读取不再新增表项为止:链表头在读取期间被并发修改会引入新项,
+// 连续两轮数量不变才说明快照稳定,方可换入 entries_;超过 MAX_HEAD_RETRIES
+// 轮仍不稳定则放弃。
 bool DfxJitDebug::ReadAllEntries(std::map<JitUID, std::shared_ptr<DfxElf>>* entries, bool* race)
 {
     for (size_t i = 0; i < MAX_HEAD_RETRIES; i++) {
@@ -507,17 +516,14 @@ bool DfxJitDebug::ReadAllEntries(std::map<JitUID, std::shared_ptr<DfxElf>>* entr
 bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias)
 {
     std::lock_guard<std::mutex> guard(lock_);
-    // miss cache: collapse repeated lookups of the same unmatched pc, so we skip
-    // the O(entries) walk and the repeated error log. invalidated when the entry
-    // count changes, because jit code cache ranges can be reused after gc.
-    // F16-0: keys carry the pid. The caches are process-global statics while
-    // DfxJitDebug instances are per-pid (per Unwinder), so a bare pc key let
-    // one process hit another process' jit elf at the same numeric address.
-    // per-pid bucketed caches: a flat (pid,pc) key with one global 8192 cap
-    // lets the first pid fill the table and starve every later pid (each of
-    // its lookups degrading to the O(entries) walk + remote reads), and pins
-    // dead pids' elfs forever. Buckets give each pid its own caps and are
-    // evicted whole (LRU) so nothing is pinned indefinitely.
+    // miss 缓存:把同一未命中 pc 的重复查找折叠掉,省去 O(entries) 遍历和
+    // 重复报错日志。表项数量变化时整体失效——GC 后 JIT 代码缓存区间可能复用。
+    // F16-0:键带上 pid。缓存是进程级 static,而 DfxJitDebug 实例按 pid 独立
+    // (每个 Unwinder 一个),裸 pc 键会让一个进程命中另一进程同数值地址上的
+    // jit elf。按 pid 分桶:若用扁平 (pid,pc) 键配一个全局 8192 上限,首个
+    // pid 会塞满整表饿死后续 pid(其每次查找都退化成 O(entries) 遍历+远程
+    // 读),且已死 pid 的 elf 被永久钉住。分桶后各 pid 有独立上限,整桶按
+    // LRU 淘汰,不会被无限期钉住。
     struct PerPidJitCache {
         std::unordered_map<uint64_t, std::pair<std::shared_ptr<DfxElf>, uint64_t>> hitPcs;
         std::unordered_set<uint64_t> missedPcs;
@@ -525,7 +531,7 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
     };
     static std::mutex s_missMutex;
     static std::unordered_map<uint32_t, PerPidJitCache> s_jitPerPid;
-    static std::deque<uint32_t> s_pidLru; // front = least recently used
+    static std::deque<uint32_t> s_pidLru; // 队首=最久未使用
     constexpr size_t kMaxPerPidEntries = 8192;
     constexpr size_t kMaxPids = 4;
     const uint32_t keyPid = static_cast<uint32_t>(pid_);
@@ -542,7 +548,7 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
         }
         PerPidJitCache& bucket = s_jitPerPid[keyPid];
         if (entries_.size() != bucket.entriesSizeWhenCached) {
-            bucket.missedPcs.clear(); // only this pid's misses, other pids untouched
+            bucket.missedPcs.clear(); // 只清本 pid 的 miss,其他 pid 不受影响
             bucket.entriesSizeWhenCached = entries_.size();
         }
         if (bucket.missedPcs.find(pc) != bucket.missedPcs.end()) {
@@ -557,8 +563,8 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
     }
 
     if (descriptorAddr_ == 0) {
-        // See EnsureJitDescriptorLocked: only conclusive per-pid failures are
-        // cached; transient ones (maps not set yet) stay retryable.
+        // 见 EnsureJitDescriptorLocked:只缓存确定性的按 pid 失败;
+        // 暂态失败(maps 尚未设置)保持可重试。
         if (!EnsureJitDescriptorLocked()) {
             DFXLOGE("FindJitElf: FindJitDescriptor failed for pc=0x%{public}" PRIx64 "", pc);
             return false;
@@ -585,7 +591,7 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
     bool race = false;
     ReadAllEntries(&entries, &race);
 
-    // ReadAllEntries swaps data into entries_, so search entries_ not local entries
+    // ReadAllEntries 已把数据换入 entries_,这里搜 entries_ 而非局部 entries
     DFXLOGU("FindJitElf: checking %{public}zu JIT entries for pc=0x%{public}" PRIx64 "", entries_.size(), pc);
     for (const auto& it : entries_) {
         const auto& jitElf = it.second;
@@ -633,12 +639,10 @@ bool DfxJitDebug::GetJitSymbolInfo(uint64_t pc, JitSymbolInfo& info)
     info.elf = elf;
     info.loadBias = static_cast<uint64_t>(loadBias);
     if (elf->HasRuntimeRange()) {
-        // JIT ELF symbol values are absolute runtime addresses (verified against
-        // ART JIT samples, where st_value equals the address inside the JIT code
-        // cache). TryJitSymbolLookup computes relPc = pc - startPc, so to keep relPc
-        // equal to the absolute runtime pc (and match the absolute symbol values),
-        // startPc must be 0. endPc is kept as the runtime range end for callers that
-        // use it for boundary checks.
+        // JIT ELF 符号值是绝对运行时地址(经 ART JIT 样本实证,st_value 即
+        // JIT 代码缓存内的地址)。TryJitSymbolLookup 计算 relPc = pc - startPc,
+        // 要让 relPc 等于绝对运行时 pc(与绝对符号值匹配),startPc 必须为 0。
+        // endPc 保留运行时区间终点,供调用方做边界判断。
         info.startPc = 0;
         info.endPc = elf->GetRuntimeEnd();
     } else {
@@ -665,8 +669,8 @@ bool DfxJitDebug::ForEachJitElf(uint64_t pc, std::function<bool(const JitSymbolI
         uint64_t loadBias = jitElf->GetLoadBias();
         info.loadBias = loadBias;
         if (jitElf->HasRuntimeRange()) {
-            // See GetJitSymbolInfo: JIT ELF symbols use absolute runtime addresses,
-            // so startPc must be 0 to keep relPc = pc in TryJitSymbolLookup.
+            // 同 GetJitSymbolInfo:JIT ELF 符号是绝对运行时地址,
+            // startPc 必须为 0,TryJitSymbolLookup 里才有 relPc = pc。
             info.startPc = 0;
             info.endPc = jitElf->GetRuntimeEnd();
         } else {

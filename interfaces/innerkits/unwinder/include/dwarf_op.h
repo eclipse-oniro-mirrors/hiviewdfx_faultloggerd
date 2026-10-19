@@ -43,11 +43,10 @@ public:
 
     AddressType Eval(DfxRegs& regs, AddressType initStackValue, AddressType startPtr);
 
-    // AOSP16-style DEX1 magic: when the DWARF expression for a register starts
-    // with the byte sequence  DW_OP_const4u 'D' 'E' 'X' '1'  DW_OP_drop,
-    // the evaluated value is the interpreted Java method's dex_pc and should
-    // be stored in the dex_pc pseudo-register instead of the normal register.
-    // See libunwindstack DwarfOp::Eval for the reference implementation.
+    // AOSP16 风格 DEX1 魔数:当某寄存器的 DWARF 表达式以字节序列
+    // DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop 开头时,求值结果即解释执行
+    // Java 方法的 dex_pc,应存入 dex_pc 伪寄存器而非普通寄存器。
+    // 参考实现见 libunwindstack DwarfOp::Eval。
     bool DexPcSet() const { return dex_pc_set_; }
     void ResetDexPcFlag() { dex_pc_set_ = false; }
 
@@ -461,9 +460,9 @@ protected:
     inline void OpBReg(uint8_t opcode, AddressType& exprPtr, DfxRegs& regs)
     {
         auto reg = static_cast<uint32_t>(opcode - DW_OP_breg0);
-        // Match libunwindstack op_breg: any register is allowed (bounds
-        // check only). ART nterp_helper's DEX PC rule reads x22 via
-        // DW_OP_breg22, which is outside the QUT table.
+        // 对齐 libunwindstack op_breg:任意寄存器都允许(仅做越界检查)。
+        // ART nterp_helper 的 DEX PC 规则经 DW_OP_breg22 读 x22,
+        // 而 x22 不在 QUT 表内。
         if (reg >= regs.RegsSize()) {
             INSTR_STATISTIC(UnsupportedDwarfOp_Breg, reg, UNW_ERROR_UNSUPPORTED_QUT_REG);
             return;
@@ -480,7 +479,7 @@ protected:
     inline void OpBRegx(AddressType& exprPtr, DfxRegs& regs)
     {
         auto reg = static_cast<uint32_t>(memory_->ReadUleb128(exprPtr));
-        // See OpBReg: no QUT restriction, only a bounds check.
+        // 同 OpBReg:不做 QUT 限制,只做越界检查。
         if (reg >= regs.RegsSize()) {
             INSTR_STATISTIC(UnsupportedDwarfOp_Bregx, reg, UNW_ERROR_UNSUPPORTED_QUT_REG);
             DFXLOGU("OpBRegx: reg=%{public}u out of bounds, skip", reg);

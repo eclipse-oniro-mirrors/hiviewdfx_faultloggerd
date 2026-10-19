@@ -80,9 +80,9 @@ public:
     int FindUnwindTable(uintptr_t pc, UnwindTableInfo& uti, void *arg) override;
     int GetMapByPc(uintptr_t pc, std::shared_ptr<DfxMap>& map, void *arg) override;
 private:
-    // Stack reads prefer process_vm_readv with a page cache; ptrace PEEKDATA is
-    // the fallback. The first method that succeeds is locked in (AOSP
-    // MemoryRemote::Read semantics), so no per-read probing after that.
+    // 栈读取优先走带页缓存的 process_vm_readv,再退回 ptrace PEEKDATA。
+    // 第一个成功的方法会被锁定(对齐 AOSP MemoryRemote::Read 语义),
+    // 之后每次读取不再重复探测。
     enum class ReadMethod : uint8_t {
         READ_METHOD_UNDECIDED,
         READ_METHOD_VM_READV,

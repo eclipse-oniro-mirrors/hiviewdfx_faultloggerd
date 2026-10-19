@@ -148,30 +148,28 @@ std::shared_ptr<DfxElf> RegularElfFactory::Create()
         DFXLOGE("Failed to open file: %{public}s, errno(%{public}d)", filePath_.c_str(), errno);
         return regularElf;
     }
-    // P14: the target process may keep mapping an old inode after ART's
-    // dex2oat atomically renamed a fresh file over this path (base.odex.tmp).
-    // Parsing the new file against the old mapping misaligns every unwind
-    // table and fabricates wrong frames, so refuse to read it: return the
-    // uninitialized elf (same as the open-failure path) and let the module
-    // degrade to "no unwind info". Anonymous/unknown identity (all zero)
-    // keeps the old behavior.
-    if (devMajor_ != 0 && inode_ != 0) { // both present (real file) or skip
+    // P14:ART 的 dex2oat 原子改名顶掉该路径后(base.odex.tmp),目标
+    // 进程可能仍映射着旧 inode。拿着新文件按旧映射解析会让所有回溯表
+    // 错位、伪造错误帧,所以拒绝读取:返回未初始化 elf(与打开失败
+    // 路径一致),让该模块退化为"无回溯信息"。匿名/未知身份(全 0)
+    // 维持旧行为。
+    if (devMajor_ != 0 && inode_ != 0) { // 两者齐全(真实文件)才校验,否则跳过
         struct stat st = {};
         if (fstat(smartFd.GetFd(), &st) != 0) {
             DFXLOGE("fstat failed, cannot verify identity: %{public}s, errno(%{public}d)",
                 filePath_.c_str(), errno);
-            return regularElf; // unverified: not latched, retried (old behavior)
+            return regularElf; // 未能核验:不锁存,可重试(旧行为)
         }
-        // decode st_dev inline (identical to musl/kernel userspace encoding)
-        // instead of major()/minor() macros: no <sys/sysmacros.h> dependency,
-        // compiles on every target (device, linux host, mingw).
+        // 内联解码 st_dev(与 musl/内核用户态编码一致),不用 major()/
+        // minor() 宏:免去 <sys/sysmacros.h> 依赖,各目标(设备、linux
+        // 宿主、mingw)都能编。
         const uint64_t dv = static_cast<uint64_t>(st.st_dev);
         const uint64_t stMajor = ((dv >> 32) & 0xfffff000ull) | ((dv >> 8) & 0xfffull);
         const uint64_t stMinor = ((dv >> 12) & 0xffffff00ull) | (dv & 0xffull);
         if (stMajor != devMajor_ || stMinor != devMinor_ ||
             static_cast<ino_t>(st.st_ino) != inode_) {
             DFXLOGE("Module file replaced (TOCTOU), skip reading: %{public}s", filePath_.c_str());
-            return nullptr; // distinct from open-failure: latched by DfxMap::GetElf
+            return nullptr; // 与打开失败不同:此返回会被 DfxMap::GetElf 锁存
         }
     }
     auto mMap = std::make_shared<DfxMmap>();
@@ -221,14 +219,14 @@ std::shared_ptr<DfxElf> VdsoElfFactory::Create()
 std::shared_ptr<DfxElf> CompressHapElfFactory::Create()
 {
     /*
-      Two layouts for an elf embedded in a package file:
-      1) apk: the .so's ELF header lives at the current (r-xp) map's own offset
-         5fa116d000-5fa72f5000 r-xp 00aa3000 /system/app/X/X.apk  <- pc here, ELF header at offset
-      2) hap: the ELF header lives in the preceding read-only map
-         c3840000-c38a6000 r--p 00174000 /data/storage/.../entry.hap <- program header (prev)
-         c38a6000-c3945000 r-xp 001d9000 /data/storage/.../entry.hap <- pc here
-      Try the current map's own offset first, then fall back to the previous
-      read-only map's offset (mirrors libunwindstack MapInfo::CreateFileMemory).
+      包裹文件内嵌 elf 的两种布局:
+      1) apk:.so 的 ELF 头就在当前(r-xp)映射自身偏移处
+         5fa116d000-5fa72f5000 r-xp 00aa3000 /system/app/X/X.apk  <- pc 在此,ELF 头位于该偏移
+      2) hap:ELF 头位于前一个只读映射
+         c3840000-c38a6000 r--p 00174000 /data/storage/.../entry.hap <- program header(前一映射)
+         c38a6000-c3945000 r-xp 001d9000 /data/storage/.../entry.hap <- pc 在此
+      先试当前映射自身偏移,再退回前一只读映射的偏移(对齐 libunwindstack
+      MapInfo::CreateFileMemory)。
     */
     if (prevMap_ == nullptr && curOffset_ == 0) {
         DFXLOGE("no offset available for embedded elf, file: %{public}s", filePath_.c_str());
@@ -244,20 +242,20 @@ std::shared_ptr<DfxElf> CompressHapElfFactory::Create()
     SmartFd smartFd(static_cast<int>(OHOS_TEMP_FAILURE_RETRY(open(filePath_.c_str(), O_RDONLY))));
     if (!smartFd) {
         DFXLOGE("Failed to open hap file, errno(%{public}d)", errno);
-        // transient failure (fd exhaustion, timing): return an invalid elf
-        // (not nullptr) so DfxMap::GetElf does NOT latch it — keeps the
-        // per-frame retry semantics aligned with RegularElfFactory.
+        // 暂态失败(fd 耗尽、时序):返回无效 elf(而非 nullptr),
+        // DfxMap::GetElf 便不会锁存——保持与 RegularElfFactory 一致的
+        // 每帧重试语义。
         return std::make_shared<DfxElf>();
     }
 
-    // 1) apk: .so ELF header typically at the current map's own offset.
+    // 1) apk:.so 的 ELF 头通常就在当前映射自身偏移处。
     if (curOffset_ != 0) {
         auto elf = LoadEmbeddedElf(smartFd.GetFd(), curOffset_, curSize_);
         if (elf != nullptr) {
             return elf;
         }
     }
-    // 2) hap / fallback: ELF header in the preceding read-only map.
+    // 2) hap/兜底:ELF 头位于前一个只读映射。
     if (prevMap_ != nullptr) {
         auto elf = LoadEmbeddedElf(smartFd.GetFd(), prevMap_->offset, prevMap_->end - prevMap_->begin);
         if (elf != nullptr) {
@@ -277,7 +275,7 @@ std::shared_ptr<DfxElf> CompressHapElfFactory::LoadEmbeddedElf(int fd, uint64_t 
     }
     const uint8_t* data = static_cast<const uint8_t*>(mmap->Get());
     if (data == nullptr || memcmp(data, ELFMAG, SELFMAG) != 0) {
-        // Not an ELF header at this offset, caller will try the next candidate.
+        // 该偏移处不是 ELF 头,调用方会试下一个候选。
         return nullptr;
     }
     uint8_t classType = data[EI_CLASS];
@@ -303,7 +301,7 @@ std::shared_ptr<DfxElf> CompressHapElfFactory::LoadEmbeddedElf(int fd, uint64_t 
         DFXLOGE("elf size equal zero, invalid elf at offset 0x%{public}" PRIx64, offset);
         return nullptr;
     }
-    constexpr size_t maxElfSize = 1024 * 1024 * 1024; // 1GB common size limit for embedded ELF
+    constexpr size_t maxElfSize = 1024 * 1024 * 1024; // 内嵌 ELF 的常规大小上限 1GB
     if (elfSize > maxElfSize) {
         DFXLOGE("elf size too large: %{public}zu", elfSize);
         return nullptr;

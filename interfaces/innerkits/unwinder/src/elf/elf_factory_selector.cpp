@@ -35,10 +35,10 @@ std::shared_ptr<ElfFactory> ElfFactorySelector::Select(DfxMap& map, pid_t pid)
         map.offset -= map.prevMap->offset;
         elfFactory = std::make_shared<CompressHapElfFactory>(map.name, map.prevMap, curOffset, curSize);
     } else if (EndsWith(map.name, ".apk")) {
-        // For an uncompressed, page-aligned .so inside an apk, the r-xp map's own
-        // offset is the .so start (= elf_start_offset). Align with libunwindstack:
-        // elf_offset = offset - elf_start_offset = 0, so GetRelPc yields a pc
-        // relative to the .so (same as debuggerd), not the apk file offset.
+        // apk 内未压缩、页对齐的 .so:r-xp 映射自身偏移即 .so 起点
+        // (= elf_start_offset)。对齐 libunwindstack:elf_offset = offset -
+        // elf_start_offset = 0,GetRelPc 得到的便是相对 .so 的 pc(同
+        // debuggerd),而非 apk 文件偏移。
         uint64_t soStart = map.offset;
         elfFactory = std::make_shared<CompressHapElfFactory>(map.name, map.prevMap, soStart, map.end - map.begin);
         map.offset -= soStart;

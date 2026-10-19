@@ -54,21 +54,20 @@ const size_t X86_FP_SP_OFFSET = 16;
 #endif
 
 #if defined(__aarch64__) || defined(__x86_64__)
-// Stack-scan fallback (StepByScan): bound the scan window and the number of
-// scan-adopted frames per unwind so a broken stack cannot cause unbounded work.
-constexpr size_t SCAN_WINDOW_WORDS = 64; // 64 words = 512 bytes above sp
+// 兜底栈扫描(StepByScan):限定扫描窗口和每次回溯最多采纳的扫描帧数,
+// 防止坏栈导致无界开销。
+constexpr size_t SCAN_WINDOW_WORDS = 64; // 64 个字 = sp 上方 512 字节
 constexpr uint8_t MAX_SCAN_STEPS = 2;
 #endif
 
-// JIT-compiled code only ever lives in anonymous or memfd mappings; a pc inside
-// a named file mapping (.so / .oat / .apk) can never match a
-// __jit_debug_descriptor entry, so the JIT registry scan can be skipped for it.
+// JIT 编译代码只存在于匿名或 memfd 映射;落在有名文件映射(.so / .oat /
+// .apk)里的 pc 不可能命中 __jit_debug_descriptor 表项,可直接跳过 JIT
+// 注册表扫描。
 static bool IsFileBackedMapName(std::string name)
 {
-    // Strip the "/proc/<pid>/root" sandbox prefix (added by DfxMap::FormatMapName)
-    // first: pseudo entries like "[shmm]" / "[anon:dalvik-...]" would otherwise
-    // start with '/' and be mistaken for file paths, which would skip the JIT
-    // lookup for anonymous executable regions (e.g. the ART JIT cache).
+    // 先剥掉 "/proc/<pid>/root" 沙箱前缀(DfxMap::FormatMapName 添加):
+    // 否则 "[shmm]"、"[anon:dalvik-...]" 这类伪表项会以 '/' 开头被误判为
+    // 文件路径,导致 ART JIT 缓存等匿名可执行区被跳过 JIT 查找。
     if (name.rfind("/proc/", 0) == 0) {
         size_t pos = name.find("/root");
         if (pos != std::string::npos) {
@@ -199,8 +198,8 @@ public:
 
     inline void SetPid(pid_t pid)
     {
-        // Reusing one Unwinder for another pid must not keep the previous
-        // pid's JIT descriptor/entries cache.
+        // 同一 Unwinder 换用另一个 pid 时,不能保留前一个 pid 的
+        // JIT 描述符/表项缓存。
         if (pid > 0 && pid != pid_) {
             pid_ = pid;
             jitDebug_.Clear();
@@ -326,55 +325,49 @@ private:
     bool TryJitStep(uintptr_t pc, void *ctx);
     bool StepByScan(uintptr_t sp, uintptr_t currentPc);
     bool StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDexPc, uintptr_t origXRefs);
-    // x25(xREFS) captured at Unwind() entry from the perf sample
+    // Unwind() 入口从 perf 采样捕获的 x25(xREFS)
 #if defined(__aarch64__)
     uintptr_t sampleXRefs_ = 0;
 #endif
-    // x29(FP) at Unwind() entry — sample true value, immune to
-    // CFI/fallback-chain pollution (speed-profile doc §7 fix).
-    // Declared on every platform (the FpTailUnwind call site reads it
-    // unconditionally); only aarch64 fills it in, so on other ports it
-    // stays 0 and the tail call never fires.
+    // Unwind() 入口的 x29(FP)——采样真值,不受 CFI/兜底链污染
+    // (speed-profile 文档 §7 修复)。所有平台都声明(FpTailUnwind 调用点
+    // 无条件读取);仅 aarch64 赋值,其他平台恒为 0,尾部回溯不会触发。
     uintptr_t sampleX29_ = 0;
 #if defined(__aarch64__)
-    // libart.so exec base for StepBridge's symbol-offset check (per unwinder
-    // instance = per target pid; ASLR differs between processes).
+    // libart.so 加载基址,供 StepBridge 做符号偏移核对(按 unwinder 实例
+    // 即按目标 pid 保存;各进程 ASLR 不同)。
     uintptr_t libartBase_ = 0;
     bool libartBaseFound_ = false;
-    // StepManaged off by default (review R6): live chain measured ~0 gain and
-    // costs a process_vm_readv round per broken chain; flip on when hiperf
-    // starts attaching sample-time managed snapshots.
+    // StepManaged 默认关闭(评审 R6):实测活链路几乎无增益,却让每条断链
+    // 多付一次 process_vm_readv;待 hiperf 开始在采样时附带受管栈快照后再开。
     bool enableManagedWalk_ = false;
 #endif
-    // FpTailUnwind: pure-FP chain tail from sample x29 (anchor-continuation)
+    // FpTailUnwind:从采样 x29 起走纯 FP 链收尾(锚点续走法)。
     void FpTailUnwind(void* ctx, size_t maxFrameNum);
-    // StepBridge: deterministic hop out of art_quick_to_interpreter_bridge.
-    // Disassembly (container libart): the bridge saves caller x29/x30 at
-    // [sp+208]/[sp+216] — not the standard frame-record slots — so neither
-    // DWARF (no CFI) nor the plain FP walk finds them; the sample stack
-    // captured them, so the hop needs no live reads. After the hop the quick
-    // chain uses standard records and continues normally.
+    // StepBridge:确定性地跳出 art_quick_to_interpreter_bridge。反汇编
+    // (容器 libart)实证:该桥把调用者 x29/x30 存在 [sp+208]/[sp+216]——
+    // 并非标准帧记录槽位——DWARF(无 CFI)和普通 FP 走链都找不到;采样栈
+    // 已捕获它们,所以这次跳转无需活读。跳出后 quick 链恢复标准帧记录,
+    // 正常续走。
     void StepBridge(size_t maxFrameNum);
-    // StepManaged (M3): live managed-stack walk from art::Thread (x28 SELF).
-    // Offsets proven by disassembly of the container libart: Thread+168 is the
-    // embedded ManagedStack triple {quick@0, link@+8, shadow@+16} (see
-    // managed_walker设计_偏移实锤_20261017.md). Walks the live quick chain —
-    // deep frames are stable across the delay-unwind window (same rationale
-    // as the JIT descriptor freeze, K5); anchor uses physical stack addresses
-    // so the continuation stays valid even though the head may have moved.
+    // StepManaged(M3):从 art::Thread(x28 SELF)出发的活受管栈走链。偏移
+    // 经容器 libart 反汇编实证:Thread+168 是内嵌 ManagedStack 三元组
+    // {quick@0, link@+8, shadow@+16}(见 managed_walker设计_偏移实锤_
+    // 20261017.md)。走的是活的 quick 链——深层帧在延迟回溯窗口内稳定
+    // (与 JIT 描述符冻结同一依据,K5);锚点用物理栈地址,即使链头已移动
+    // 续走仍然有效。
     void StepManaged(void* ctx, size_t maxFrameNum);
-    // K12: map-pointer cache for thread-root candidates (libc/ld-musl maps).
-    // Frames in those maps are cheap to classify; only they pay a symbol
-    // lookup. Untouched when lookup fails (strip/unreachable) = old behavior.
+    // K12:线程根候选映射(libc/ld-musl)的 map 指针缓存。落在这两类映射
+    // 里的帧先廉价分类,只有它们才付出符号查询。查询失败(strip/不可达)
+    // 时不写缓存 = 维持旧行为。
     std::unordered_map<const DfxMap *, bool> rootMapCache_ {};
-    const DfxMaps *rootMapGen_ = nullptr; // maps_ generation, invalidates cache
+    const DfxMaps *rootMapGen_ = nullptr; // maps_ 代数,用于缓存失效
     bool IsThreadRootFrame();
-    // AOSP16-style DEX frame injection: called at the start of each StepInner
-    // iteration. If a previous DWARF Step set the dex_pc pseudo-register (via
-    // the DEX1 magic marker in libart.so's CFI), inject a virtual DEX frame
-    // for the interpreted Java method before the current native frame is
-    // added. This produces the canonical stack ordering:
-    //   ... | nterp_helper | <DEX frame> | caller-of-nterp_helper | ...
+    // AOSP16 风格 DEX 帧注入:每次 StepInner 迭代开头调用。若上一次
+    // DWARF Step 已设置 dex_pc 伪寄存器(经 libart.so CFI 的 DEX1 魔数
+    // 标记),则在加入当前本机帧之前,先为解释执行的 Java 方法注入一个
+    // 虚拟 DEX 帧。由此得到规范的栈序:
+    //   ... | nterp_helper | <DEX 帧> | nterp_helper 的调用者 | ...
     void InjectDexFrameFromDwarf();
     void TryJitSymbolLookup(DfxFrame& frame);
 #if defined(ENABLE_MIXSTACK)
@@ -419,11 +412,10 @@ private:
     MAYBE_UNUSED bool stopWhenArkFrame_ = false;
     MAYBE_UNUSED bool isJitCrash_ = false;
     uintptr_t arkwebJsExtractorptr_ = 0;
-    // Last pc produced by the LR fallback (see UpdateRegsState). LR is only
-    // refreshed by a successful DWARF Apply (x30 rule); falling back to an
-    // already-consumed LR value never advances the unwind.
+    // LR 兜底最近一次产出的 pc(见 UpdateRegsState)。LR 只在 DWARF Apply
+    // 成功时经 x30 规则刷新;对已消费过的 LR 值再兜底永远无法推进回溯。
     uintptr_t lastLrFallbackPc_ = 0;
-    // Last-resort stack scan (off by default; enable via SetEnableScanStep).
+    // 兜底栈扫描(默认关闭,经 SetEnableScanStep 开启)。
     bool enableScanStep_ = false;
     uint8_t scanUsedCount_ = 0;
 
@@ -932,16 +924,16 @@ bool Unwinder::Impl::StepV8Frame(StepFrame& frame, const std::shared_ptr<DfxMap>
     return true;
 }
 
-// K12: __start_thread / __libc_init are the stack bottom of a thread; any
-// frame beyond them (produced by scan/LR/fp fallbacks from stack-bottom
-// residue) is an artifact. Observed on ~82% of hiperf sample chains
-// (trampoline mirror + repeated start); cdumpcatcher is unaffected.
+// K12:__start_thread / __libc_init 是线程的栈底;它们之后出现的任何帧
+// (由 scan/LR/fp 兜底从栈底残留里捞出来的)都是伪帧。hiperf 采样链上
+// 观测到约 82% 受此影响(trampoline 镜像 + 重复的 start);
+// cdumpcatcher 不受影响。
 bool Unwinder::Impl::IsThreadRootFrame()
 {
     if (frames_.size() < 2 || maps_ == nullptr) {
         return false;
     }
-    if (rootMapGen_ != maps_.get()) { // maps snapshot replaced: drop stale keys
+    if (rootMapGen_ != maps_.get()) { // maps 快照已更换:丢弃过期键
         rootMapCache_.clear();
         rootMapGen_ = maps_.get();
     }
@@ -956,14 +948,14 @@ bool Unwinder::Impl::IsThreadRootFrame()
         isRootMap = it->second;
     } else {
         const std::string& name = m->name;
-        // exact module names only: a bare "libc" substring would also match
-        // libcrypto / libc++_shared and pay needless symbol lookups.
+        // 只做精确模块名匹配:裸 "libc" 子串会连带命中 libcrypto /
+        // libc++_shared,白白付出符号查询。
         isRootMap = (name.size() >= 8 && name.compare(name.size() - 8, 8, "/libc.so") == 0) ||
                     (name.find("ld-musl") != std::string::npos);
-        // qwen review: 16 is too small — a process has 100+ distinct DfxMap
-        // pointers (one per VMA per so); at 16, most app-library frames miss
-        // the cache and pay a string comparison every frame (the 2.58%
-        // hotspot). 512 entries ≈ 30KB covers the full working set.
+        // qwen 评审:16 太小——一个进程有 100+ 个不同的 DfxMap 指针(每个
+        // so 的每个 VMA 一个);上限 16 时大多数应用库帧都会 miss 缓存,
+        // 每帧都付一次字符串比较(占 2.58% 热点)。512 项 ≈ 30KB,可覆盖
+        // 全部工作集。
         if (rootMapCache_.size() < 512) {
             rootMapCache_[m] = isRootMap;
         }
@@ -974,22 +966,22 @@ bool Unwinder::Impl::IsThreadRootFrame()
     std::string funcName;
     uint64_t funcOffset = 0;
     if (!GetSymbolByPc(fr.pc, maps_, funcName, funcOffset)) {
-        return false; // no symbol -> keep unwinding (old behavior)
+        return false; // 查不到符号 -> 继续回溯(旧行为)
     }
     return (funcName.find("__start_thread") != std::string::npos) ||
            (funcName.find("__libc_init") != std::string::npos) ||
            (funcName.find("__libc_start_main") != std::string::npos);
 }
 
-// FpTailUnwind: walk the pure FP chain from the original sample x29.
-// v2 anchor-continuation design (FpStep_odex doc):
-//   - anchor = frames_.back().sp (last successful frame's SP, always clean
-//     because failed frames are never added to frames_)
-//   - only append frames whose fp > anchor (physically deeper in stack)
-//   - no pc comparison / no dedup — avoids return-addr vs DoPcAdjust
-//     mismatch and legitimate-recursion false deletion
-//   - stops at thread root (IsThreadRootFrame) / fp non-increasing /
-//     read failure / frame budget
+// FpTailUnwind:从原始采样 x29 起走纯 FP 链。v2 锚点续走设计
+// (FpStep_odex 文档):
+//   - 锚点 = frames_.back().sp(最后一个成功帧的 SP,永远干净——失败的帧
+//     从不加入 frames_)
+//   - 只追加 fp > 锚点的帧(栈内物理位置更深)
+//   - 不比较 pc、不去重——避开"返回地址 vs DoPcAdjust 后 pc"错位和
+//     合法递归被误删的问题
+//   - 到线程根(IsThreadRootFrame)/ fp 不再增长 / 读失败 / 帧数预算
+//     耗尽即停
 void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
 {
 #if defined(__aarch64__)
@@ -997,7 +989,7 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
         memory_->SetCtx(ctx);
     }
     if (frames_.empty()) return;
-    // anchor: SP of the last successfully added frame (clean, unpolluted)
+    // 锚点:最后一个成功加入帧的 SP(干净、未受污染)
     uintptr_t anchor = frames_.back().sp;
     uintptr_t fp = sampleX29_;
     uintptr_t prevFp = 0;
@@ -1005,30 +997,29 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
     size_t appended = 0;
     while (fp != 0 && fp > prevFp && appended < budget) {
         uintptr_t nextFp = 0, nextPc = 0;
-        // Same idiom as FpStep: first Read with incre=true advances the
-        // cursor past caller_fp, the second reads caller_pc in place.
-        // (Read takes uintptr_t& — never pass an rvalue expression.)
+        // 与 FpStep 同一写法:第一次 Read 置 incre=true 推进游标跳过
+        // caller_fp,第二次原地读 caller_pc。(Read 形参是 uintptr_t&——
+        // 切勿传右值表达式。)
         uintptr_t ptr = fp;
         if (!memory_->Read<uintptr_t>(ptr, &nextFp, true)) break;
         if (!memory_->Read<uintptr_t>(ptr, &nextPc, false)) break;
         if (nextFp == 0 || nextFp <= fp) break;
         nextPc = StripPac(nextPc, pacMask_);
-        // Same call-site convention as the main loop: fp records hold the
-        // raw return address, the main loop frames store DoPcAdjust-ed pcs,
-        // so keep them comparable for symbolization (offset differs by 4).
+        // 与主循环同一调用点约定:fp 帧记录存的是原始返回地址,主循环帧存
+        // DoPcAdjust 后的 pc,这里同样调整保证符号化可比(偏移差 4)。
         DoPcAdjust(nextPc);
-        // anchor-continuation: skip frames at or above the anchor
-        // (already unwound by the main loop); only append deeper frames
+        // 锚点续走:跳过位于锚点之上(含)的帧(主循环已回溯过),
+        // 只追加更深的帧
         if (fp <= anchor) {
             prevFp = fp;
             fp = nextFp;
             continue;
         }
-        // validate: pc must be in an executable map (reject stack residue)
+        // 校验:pc 必须落在可执行映射(拒绝栈残留)
         std::shared_ptr<DfxMap> map = nullptr;
         if (maps_ == nullptr || !maps_->FindMapByAddr(nextPc, map) ||
             map == nullptr || !map->IsMapExec()) {
-            break; // garbage pc — stop, don't fabricate frames
+            break; // 垃圾 pc——停止,不伪造帧
         }
         StepFrame frame;
         frame.pc = nextPc;
@@ -1036,7 +1027,7 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
         frame.fp = nextFp;
         AddFrame(frame, map);
         appended++;
-        // thread-root check (K12, same logic)
+        // 线程根检查(K12,同一逻辑)
         if (!frames_.empty()) {
             const auto& lastF = frames_.back();
             if (lastF.map != nullptr) {
@@ -1060,21 +1051,19 @@ void Unwinder::Impl::FpTailUnwind(void* ctx, size_t maxFrameNum)
             appended, (uint64_t)anchor);
     }
 #else
-    // Non-aarch64 ports: the FP-chain tail is not implemented; keep the
-    // signature so the (unconditional) call site links and stopByFailure
-    // stays consumed on every platform.
+    // 非 aarch64 平台:未实现 FP 链收尾;保留函数签名让(无条件)调用点
+    // 可链接,stopByFailure 在所有平台都被消费。
     (void)ctx;
     (void)maxFrameNum;
 #endif
 }
 
-// Deterministic hop out of art_quick_to_interpreter_bridge. Offsets from
-// disassembly of the container libart (aarch64):
-//   art_quick_to_interpreter_bridge @ 0x34f5e0, size 0xfc
-//   prologue: sub sp,#224; ...; stp x29, x30, [sp,#208]; bl bridge body
-// The saved pair is the quick caller's real frame record, so after the hop
-// the chain continues over standard records. ART-version coupled: if libart
-// is updated, re-derive via the same one-symbol disassembly.
+// 确定性跳出 art_quick_to_interpreter_bridge。偏移取自容器 libart 的
+// 反汇编(aarch64):
+//   art_quick_to_interpreter_bridge @ 0x34f5e0,大小 0xfc
+//   序言:sub sp,#224; ...; stp x29, x30, [sp,#208]; bl 桥体
+// 保存的这对值就是 quick 调用者的真实帧记录,跳出后链沿标准帧记录继续。
+// 与 ART 版本耦合:libart 升级后须按同样方式重推(单符号反汇编)。
 void Unwinder::Impl::StepBridge(size_t maxFrameNum)
 {
 #if defined(__aarch64__)
@@ -1086,9 +1075,9 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
     if (frames_.empty() || maps_ == nullptr) return;
     if (!libartBaseFound_) {
         libartBaseFound_ = true;
-        // Load base = the LOWEST libart.so mapping (the r-- ELF-header LOAD),
-        // not "any exec mapping": with several rx rows the first exec row may
-        // be a mid-LOAD vaddr and bias+symbolOffset would be wrong (review R3).
+        // 加载基址 = libart.so 最低的那个映射(r-- 的 ELF 头 LOAD),而非
+        // "任一可执行映射":rx 行不止一条时,首条 exec 行可能是某个 LOAD
+        // 中部的 vaddr,bias+符号偏移 就会算错(评审 R3)。
         uintptr_t lowest = UINTPTR_MAX;
         for (const auto& m : maps_->GetMaps()) {
             if (m != nullptr && m->name.find("libart.so") != std::string::npos &&
@@ -1099,18 +1088,18 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
             }
         }
         if (lowest == UINTPTR_MAX) return;
-        // Machine-code signature of the bridge prologue (review R3/R5):
+        // 桥序言的机器码签名(评审 R3/R5):
         //   +0x00: sub sp, sp, #224        = 0xd10383ff
         //   +0x40: stp x29, x30, [sp,#208] = 0xa90d7bfd
-        // Any mismatch (ART update moved/changed the bridge) fails CLOSED:
-        // StepBridge stays disabled instead of gambling on stale offsets.
+        // 任一不匹配(ART 升级挪动/改写了桥)即整体失效:StepBridge 保持
+        // 关闭,而不是赌旧偏移仍然正确。
         uintptr_t a0 = lowest + kBridgeOff;
         uintptr_t a40 = lowest + kBridgeOff + 0x40;
         uintptr_t w0 = 0, w40 = 0;
         if (!memory_->Read<uintptr_t>(a0, &w0, false) ||
             !memory_->Read<uintptr_t>(a40, &w40, false) ||
             w0 != 0xd10383ffULL || w40 != 0xa90d7bfdULL) {
-            return; // signature mismatch — keep libartBase_ == 0 (disabled)
+            return; // 签名不匹配——保持 libartBase_ == 0(禁用)
         }
         libartBase_ = lowest;
     }
@@ -1119,7 +1108,7 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
     const uintptr_t pc = static_cast<uintptr_t>(last.pc);
     const uintptr_t lo = libartBase_ + kBridgeOff;
     if (pc < lo || pc >= lo + kBridgeSize) return;
-    // Fixed-slot escape: caller fp/lr live in the captured sample stack.
+    // 固定槽位逃生:调用者 fp/lr 就在已捕获的采样栈里。
     const uintptr_t bridgeSp = static_cast<uintptr_t>(last.sp);
     uintptr_t fpAddr = bridgeSp + kSavedFpSlot;
     uintptr_t lrAddr = bridgeSp + kSavedLrSlot;
@@ -1128,9 +1117,9 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
     if (!memory_->Read<uintptr_t>(lrAddr, &callerLr, false)) return;
     uintptr_t callerPc = StripPac(callerLr, pacMask_);
     DoPcAdjust(callerPc);
-    if (callerFp <= bridgeSp || callerPc == 0) return; // implausible
-    // Stack-residue hardening (review R1): ABI alignment, monotonic growth
-    // past the broken frame's own fp, and within the captured stack window.
+    if (callerFp <= bridgeSp || callerPc == 0) return; // 取值不合理
+    // 栈残留加固(评审 R1):ABI 对齐、越过断帧自身 fp 的单调增长、且在
+    // 已捕获栈窗口之内。
     if ((callerFp & 0xf) != 0) return;
     if (callerFp <= static_cast<uintptr_t>(last.fp)) return;
     if (callerFp - bridgeSp > 0x10000) return;
@@ -1141,8 +1130,8 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
     frame.sp = bridgeSp + kBridgeFrameSize;
     frame.fp = callerFp;
     AddFrame(frame, map);
-    // Trigger/continuation observability (review R3): logs are stripped in
-    // release builds, so persist a one-line counter file (every 1000 hits).
+    // 触发/续走可观测性(评审 R3):发布版日志会被裁剪,改落一行计数文件
+    // (每 1000 次记一笔)。
     {
         static std::atomic<uint32_t> sBridgeHits {0};
         uint32_t n = sBridgeHits.fetch_add(1) + 1;
@@ -1154,8 +1143,7 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
             }
         }
     }
-    // The caller is quick code: continue over standard frame records,
-    // same walking rules as FpTailUnwind.
+    // 调用者是 quick 代码:沿标准帧记录继续走链,规则同 FpTailUnwind。
     uintptr_t fp = callerFp;
     uintptr_t prevFp = 0;
     while (fp != 0 && fp > prevFp && frames_.size() < maxFrameNum) {
@@ -1168,7 +1156,7 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
         DoPcAdjust(pc2);
         std::shared_ptr<DfxMap> map2 = nullptr;
         if (!maps_->FindMapByAddr(pc2, map2) || map2 == nullptr || !map2->IsMapExec()) {
-            break; // garbage pc — stop, don't fabricate frames
+            break; // 垃圾 pc——停止,不伪造帧
         }
         StepFrame frame2;
         frame2.pc = pc2;
@@ -1179,33 +1167,31 @@ void Unwinder::Impl::StepBridge(size_t maxFrameNum)
         if (lf.map != nullptr) {
             const std::string& mn = lf.map->name;
             if (mn.size() >= 8 && mn.compare(mn.size() - 8, 8, "/libc.so") == 0) {
-                break; // thread root convention reached
+                break; // 到达线程根约定
             }
         }
         prevFp = fp;
         fp = nextFp;
     }
 #else
-    (void)maxFrameNum; // keep the signature linkable on non-aarch64
+    (void)maxFrameNum; // 保留签名,非 aarch64 也可链接
 #endif
 }
 
-// M3: managed-stack walk. Reads the LIVE art::Thread (x28 at sample time),
-// takes the quick-chain head from Thread+168 and walks it with the same
-// anchor-continuation rule as FpTailUnwind. Everything is read with
-// process_vm_readv: the Thread object and the current thread stack live in
-// the target process (memory_->Read only sees the captured sample stack /
-// elf files). Timing: the chain is read at unwind time, not at sample time;
-// deep frames (root direction) are stable on the seconds scale, the head
-// may have moved — the physical-address anchor keeps the splice valid.
+// M3:受管栈走链。读取活的 art::Thread(采样时刻的 x28),从 Thread+168
+// 取 quick 链表头,按 FpTailUnwind 同款锚点续走规则走链。所有读取都走
+// process_vm_readv:Thread 对象和当前线程栈都在目标进程里(memory_->Read
+// 只能看到已捕获的采样栈/elf 文件)。时序:链是回溯时读的,不是采样时;
+// 深层帧(靠根方向)在秒级稳定,链头可能已移动——物理地址锚点保证拼接
+// 依然有效。
 void Unwinder::Impl::StepManaged(void* ctx, size_t maxFrameNum)
 {
 #if defined(__aarch64__)
     (void)ctx;
     if (frames_.empty() || pid_ <= 0) return;
     uintptr_t self = (*regs_)[REG_AARCH64_X28];
-    // Conservative plausibility for a container art::Thread*: heap band,
-    // aligned. Anything else (native code clobbers x28) bails out.
+    // 容器 art::Thread* 的保守合法性检查:落在堆区间、指针对齐。其他取值
+    // (本机代码会改写 x28)直接退出。
     if (self < 0x5000000000ULL || self >= 0x8000000000ULL || (self & 7) != 0) return;
     auto rdRemote = [this](uintptr_t addr, uintptr_t* out) {
         struct iovec local { out, sizeof(uintptr_t) };
@@ -1213,15 +1199,15 @@ void Unwinder::Impl::StepManaged(void* ctx, size_t maxFrameNum)
         return process_vm_readv(pid_, &local, 1, &remote, 1, 0) ==
             static_cast<ssize_t>(sizeof(uintptr_t));
     };
-    // self-reference check (art::Thread stores self_; also filters the
-    // self-referential list nodes that fooled probe v2).
+    // 自引用检查(art::Thread 存有 self_;顺带过滤曾骗过 probe v2 的
+    // 自引用链表节点)。
     bool selfFound = false;
     for (size_t off = 0; off < 512 && !selfFound; off += sizeof(uintptr_t)) {
         uintptr_t v = 0;
         if (rdRemote(self + off, &v) && v == self) selfFound = true;
     }
     if (!selfFound) return;
-    // ManagedStack triple at Thread+168 (disassembly-proven).
+    // Thread+168 处的 ManagedStack 三元组(反汇编实证)。
     uintptr_t msQuick = 0, msLink = 0, msShadow = 0;
     if (!rdRemote(self + 168, &msQuick) || !rdRemote(self + 176, &msLink) ||
         !rdRemote(self + 184, &msShadow)) {
@@ -1230,10 +1216,10 @@ void Unwinder::Impl::StepManaged(void* ctx, size_t maxFrameNum)
     auto inStack = [](uintptr_t v) {
         return v >= 0x5f00000000ULL && v < 0x8000000000ULL;
     };
-    if (msQuick != 0 && !inStack(msQuick)) return;      // fake thread
+    if (msQuick != 0 && !inStack(msQuick)) return;      // 假线程
     if (msShadow != 0 && (msShadow < 0x5000000000ULL || msShadow >= 0x8000000000ULL)) return;
-    // anchor-continuation, same rule as FpTailUnwind: only frames whose
-    // record lies above the last successful frame's SP are appended.
+    // 锚点续走,规则同 FpTailUnwind:只追加帧记录位于最后一个成功帧 SP
+    // 之上的帧。
     const uintptr_t anchor = frames_.back().sp;
     size_t budget = maxFrameNum - frames_.size();
     size_t appended = 0;
@@ -1250,7 +1236,7 @@ void Unwinder::Impl::StepManaged(void* ctx, size_t maxFrameNum)
             std::shared_ptr<DfxMap> map = nullptr;
             if (maps_ == nullptr || !maps_->FindMapByAddr(pc, map) ||
                 map == nullptr || !map->IsMapExec()) {
-                break; // garbage pc — stop, don't fabricate frames
+                break; // 垃圾 pc——停止,不伪造帧
             }
             StepFrame frame;
             frame.pc = pc;
@@ -1262,7 +1248,7 @@ void Unwinder::Impl::StepManaged(void* ctx, size_t maxFrameNum)
             if (lastF.map != nullptr) {
                 const std::string& mn = lastF.map->name;
                 if (mn.size() >= 8 && mn.compare(mn.size() - 8, 8, "/libc.so") == 0) {
-                    break; // thread root convention reached
+                    break; // 到达线程根约定
                 }
             }
         }
@@ -1290,10 +1276,9 @@ bool Unwinder::Impl::UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc
         StepInner(true, frame, ctx);
         return true;
     }
-    // pc before DoPcAdjust: the raw return address produced by the previous
-    // step. An LR fallback that re-consumes a stale LR bounces the pc between
-    // lr and lr-4 (the adjust), so the repeated-frame check below must compare
-    // against rawPc as well, not only the adjusted entry pc.
+    // DoPcAdjust 之前的 pc:上一步产出的原始返回地址。LR 兜底若重复消费
+    // 陈旧 LR,pc 会在 lr 与 lr-4(调整量)之间往返,所以下方重复帧检查
+    // 除调整后的入口 pc 外还须与 rawPc 比较。
     uintptr_t rawPc = frame.pc;
     if (!frame.isJsFrame && needAdjustPc) {
         DoPcAdjust(frame.pc);
@@ -1336,7 +1321,7 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     bool needAdjustPc = false;
     isResetFrames_ = false;
     lastLrFallbackPc_ = 0;
-    bool stopByFailure = false; // phase-1: FpTailUnwind only on mid-chain failure
+    bool stopByFailure = false; // 阶段一:仅链中失败时才走 FpTailUnwind
     StepFrame frame;
     do {
         if (!isResetFrames_ && (skipFrameNum != 0) && (frames_.size() >= skipFrameNum)) {
@@ -1354,13 +1339,13 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
             stopByFailure = true;
             break;
         }
-        if (IsThreadRootFrame()) { // K12: thread root reached, stop unwinding
+        if (IsThreadRootFrame()) { // K12:到达线程根,停止回溯
             break;
         }
     } while (true);
-    // Phase-0 observability: bucket the terminal error code so one hilog grep
-    // separates RA-undefined termination (odex bridge CFI, cause (d)) from
-    // polluted-fp illegal values (cause (a)) and read failures ((a)/(c)).
+    // 阶段零可观测性:把终止错误码分桶统计,一次 hilog 检索即可区分
+    // RA-undefined 终止(odex 桥 CFI,成因 (d))、被污染 fp 的非法值
+    // (成因 (a))与读失败((a)/(c))。
     {
         static std::atomic<uint64_t> sTotal {0}, sNone {0}, sRaUndef {0}, sIllegal {0}, sMem {0}, sOther {0};
         uint64_t n = sTotal.fetch_add(1) + 1;
@@ -1383,49 +1368,44 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
                 n, sNone.load(), sRaUndef.load(), sIllegal.load(), sMem.load(), sOther.load());
         }
     }
-    // speed-profile doc §7: when dwarf broke in no-table odex and the
-    // fallback chain got polluted, the ART-maintained FP chain from the
-    // original sample x29 is still valid. Walk it as ultimate fallback
-    // (anchor-continuation: only append frames physically deeper than
-    // the last successful frame's SP — no pc comparison, no dedup).
-    // Only on failure: a chain that already reached the thread root (or hit
-    // the frame budget) has no tail to recover and must not pay the walk.
-    // (Unconditional call: FpTailUnwind itself compiles to a no-op on
-    // non-aarch64, which also keeps stopByFailure used on every platform.)
+    // speed-profile 文档 §7:DWARF 在无表 odex 中断链、兜底链被污染时,
+    // 从原始采样 x29 出发、由 ART 维护的 FP 链依然有效。作为终极兜底走
+    // 一遍(锚点续走:只追加物理位置深于最后一个成功帧 SP 的帧——不比
+    // pc、不去重)。仅失败时走:已到线程根(或帧数预算耗尽)的链没有尾巴
+    // 可捞,不应白付一趟走链。(无条件调用:FpTailUnwind 在非 aarch64 上
+    // 编译为空操作,顺带让 stopByFailure 在所有平台都被消费。)
     if (stopByFailure && !frames_.empty()) {
-        // Deterministic bridge hop first (no live reads, uses the captured
-        // stack); FP tail and the managed walk follow for other shapes.
+        // 先做确定性桥跳转(无活读,用已捕获的栈);FP 收尾和受管走链
+        // 随后处理其他形态。
         StepBridge(maxFrameNum);
     }
     if (stopByFailure && sampleX29_ != 0 && !frames_.empty()) {
         FpTailUnwind(ctx, maxFrameNum);
     }
-    // M3: after the FP tail, try the live managed chain — it crosses the
-    // JNI/nterp barriers that stop the FP walk (chain head sits behind them).
-    // Gated OFF by default (review R6): live walk measured ~0 gain (deep
-    // frames pop before unwind time) at a vm-readv cost per broken chain.
+    // M3:FP 收尾之后再试活受管链——它能穿过挡住 FP 走链的 JNI/nterp
+    // 壁垒(链头在壁垒之后)。默认关闭(评审 R6):实测活走链几乎无增益
+    // (深层帧在回溯前就已弹栈),每条断链却要付一次 vm-readv。
 #if defined(__aarch64__)
     if (stopByFailure && enableManagedWalk_ && !frames_.empty()) {
         StepManaged(ctx, maxFrameNum);
     }
 #endif
 #if defined(__aarch64__)
-    // Managed-stack probe (prototype, milestone M1): when the chain broke and
-    // the sample carries a plausible art::Thread* in x28 (ART quick-code SELF
-    // convention), dump the Thread object neighborhood via process_vm_readv
-    // (memory_->Read cannot reach anonymous heap; the JIT reader proved this
-    // direct path works in-process). Probe file only — no behavior change,
-    // throttled to a few dumps per process for offline offset analysis.
+    // 受管栈探针(原型,里程碑 M1):断链且采样 x28 带有貌似合法的
+    // art::Thread*(ART quick 代码 SELF 约定)时,经 process_vm_readv 转储
+    // Thread 对象邻域(memory_->Read 够不到匿名堆;JIT 读取器已实证这条
+    // 直读路径可在进程内工作)。只落探针文件——不改变行为,每进程限次,
+    // 供离线偏移分析。
     if (stopByFailure) {
         static std::atomic<uint32_t> sProbeCount {0};
         uintptr_t self = (*regs_)[REG_AARCH64_X28];
         if (self > 0x10000 && (self & 7) == 0 && pid_ > 0 && sProbeCount.load() < 16) {
             const uintptr_t page = self & ~static_cast<uintptr_t>(0xfff);
-            const size_t kBytes = 8192; // covers [page, page+8K): self and the
-                                        // tls_/tlsPtr_ neighborhood after it
+            const size_t kBytes = 8192; // 覆盖 [page, page+8K):self 及其后
+                                        // 的 tls_/tlsPtr_ 邻域
             uint8_t out[kBytes];
-            // One big read first (single syscall); fall back to word-wise only
-            // if the bulk read fails (partially unmapped window).
+            // 先一次大块读(单次系统调用);仅当整块失败(窗口部分未映射)
+            // 才退回逐字读。
             struct iovec localBulk { out, kBytes };
             struct iovec remoteBulk { reinterpret_cast<void *>(page), kBytes };
             bool ok = process_vm_readv(pid_, &localBulk, 1, &remoteBulk, 1, 0) ==
@@ -1442,10 +1422,9 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
                 }
             }
             if (ok) {
-                // Validate before dumping: a real art::Thread contains the
-                // self-referencing self_ pointer (== x28). In native code x28
-                // is an ordinary callee-saved register (probe v1 dumped JSON
-                // buffers this way) — require the self-reference to accept.
+                // 转储前校验:真正的 art::Thread 含自引用的 self_ 指针
+                // (== x28)。本机代码里 x28 只是普通被调用者保存寄存器
+                // (probe v1 就这样转储过 JSON 缓冲)——必须找到自引用才认。
                 bool selfFound = false;
                 for (size_t i = 0; i + sizeof(uintptr_t) <= kBytes; i += sizeof(uintptr_t)) {
                     uintptr_t v = 0;
@@ -1460,7 +1439,7 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
                         "/data/local/tmp/mprobe_%u.bin", sProbeCount.load()) > 0) {
                         FILE* pf = fopen(probePath, "wb");
                         if (pf != nullptr) {
-                            // 16-byte header: magic + self + tid, then the 8K window
+                            // 16 字节头:magic + tid + self,随后是 8K 窗口
                             const uint32_t magic = 0x4b54534d; // "MSTK"
                             fwrite(&magic, sizeof(magic), 1, pf);
                             const uint32_t tid = static_cast<uint32_t>(gettid());
@@ -1468,7 +1447,7 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
                             fwrite(&self, sizeof(self), 1, pf);
                             fwrite(out, 1, kBytes, pf);
                             fclose(pf);
-                            sProbeCount.fetch_add(1); // quota consumed only on a real dump
+                            sProbeCount.fetch_add(1); // 只有真正转储才消耗配额
                             DFXLOGW("ManagedProbe: dumped thread=%{private}p to %{public}s",
                                 reinterpret_cast<void *>(self), probePath);
                         }
@@ -1645,12 +1624,11 @@ bool Unwinder::Impl::AddFrameMap(const StepFrame& frame, std::shared_ptr<DfxMap>
 {
     int mapRet = memory_->GetMapByPc(frame.pc, map);
     if (mapRet != UNW_ERROR_NONE && maps_ != nullptr) {
-        // The accessor-provided maps can lag behind the target's live mappings:
-        // customize callers (e.g. hiperf) feed perf-recorded maps, which never
-        // learn about reserve+mprotect regions such as the ART JIT cache, and a
-        // map miss here would cut the callchain short. Retry with our own
-        // /proc snapshot before treating the pc as unmapped. Only an executable
-        // map counts: a pc in a non-exec region is garbage either way.
+        // accessor 提供的 maps 可能落后于目标进程的活映射:customize 调用
+        // 方(如 hiperf)喂的是 perf 记录的 maps,永远不知道 reserve+mprotect
+        // 出来的区域(如 ART JIT 缓存),此处映射未命中会截断调用链。先拿
+        // 自己的 /proc 快照重试,再判定 pc 未映射。只认可执行映射:落在
+        // 非执行区的 pc 无论哪种情况都是垃圾。
         std::shared_ptr<DfxMap> snapshotMap;
         if (maps_->FindMapByAddr(static_cast<uintptr_t>(frame.pc), snapshotMap) &&
             snapshotMap != nullptr && snapshotMap->IsMapExec()) {
@@ -1748,11 +1726,9 @@ void Unwinder::Impl::StepToNextFpIfNeed()
         if (!memory_->Read<uintptr_t>(fp, &nextFp, false)) {
             return;
         }
-        // Only advance along a plausible fp chain. [fp] can hold arbitrary
-        // data (e.g. a Java object pointer read while the fp belongs to a
-        // native frame reached via LR fallback); blindly adopting it clobbers
-        // the fp and dooms the later FpStep. FpStep itself requires the chain
-        // to grow, so require the same here.
+        // 只沿貌似合法的 fp 链前进。[fp] 处可能是任意数据(例如经 LR 兜底
+        // 到达本机帧时读到的是 Java 对象指针);盲目采纳会污染 fp、毁掉
+        // 后续 FpStep。FpStep 自身要求链单调增长,这里沿用同一判据。
         if (nextFp > fp) {
             regs_->SetFp(nextFp);
         }
@@ -1766,29 +1742,26 @@ bool Unwinder::Impl::StepByScan(uintptr_t sp, uintptr_t currentPc)
     if (memory_ == nullptr || maps_ == nullptr || sp == 0) {
         return false;
     }
-    // Last-resort stack scan (AOSP ScanFrame style), reached only when every
-    // other strategy failed: no unwind info for the pc (third-party libs such
-    // as libttffmpeg.so / libsscronet.so ship most of .text without
-    // .eh_frame), LR is stale or a no-op, and the fp chain is unusable
-    // (-fomit-frame-pointer). Walk the stack upwards from sp and adopt the
-    // first word that plausibly is a saved return address: 4-byte aligned and
-    // pointing into an executable mapping. The caller's saved RA usually sits
-    // within a few dozen words of sp, so the 512-byte window suffices.
+    // 终极兜底栈扫描(AOSP ScanFrame 风格),只在其余策略全部失败时到达:
+    // pc 无回溯信息(第三方库如 libttffmpeg.so / libsscronet.so 的大部分
+    // .text 不带 .eh_frame)、LR 已失效或无操作、fp 链不可用
+    // (-fomit-frame-pointer)。从 sp 向上扫栈,采纳第一个貌似保存返回地址
+    // 的字:4 字节对齐且指向可执行映射。调用者的保存 RA 通常离 sp 只有
+    // 几十个字,512 字节窗口足够。
     for (size_t i = 0; i < SCAN_WINDOW_WORDS; i++) {
         uintptr_t addr = sp + i * sizeof(uintptr_t);
         uintptr_t val = 0;
         if (!memory_->ReadMem(addr, &val)) {
-            break; // left the readable stack
+            break; // 已离开可读栈区
         }
         uintptr_t candidate = StripPac(val, pacMask_);
-        // aarch64: instructions are 4-byte aligned. x86_64: no alignment
-        // requirement — the mask only discards values unlikely to be
-        // return addresses.
+        // aarch64:指令 4 字节对齐。x86_64:无对齐要求——掩码只是
+        // 过滤掉大概率不是返回地址的值。
         if ((candidate & 0x3) != 0) {
             continue;
         }
         if (candidate == currentPc) {
-            continue; // no progress
+            continue; // 无进展
         }
         std::shared_ptr<DfxMap> map;
         if (!maps_->FindMapByAddr(candidate, map) || map == nullptr || !map->IsMapExec()) {
@@ -1812,20 +1785,17 @@ void Unwinder::Impl::UpdateRegsState(
 {
     SetLocalStackCheck(ctx, true);
 #if defined(__aarch64__)
-    // Save x22 (dex_pc) and x25 (xREFS) before Apply: the flush can
-    // overwrite them even when Apply returns false, and StepNterp needs
-    // the original live values to locate the nterp frame.
+    // Apply 前保存 x22(dex_pc)与 x25(xREFS):即使 Apply 返回 false,
+    // Flush 也可能已改写它们;StepNterp 需要原始现场值定位 nterp 帧。
     uintptr_t origDexPc = (*regs_)[22]; // 22: x22 (xPC) on ARM64
-    // Prefer sample-time x25 (immune to CFI-chain corruption)
+    // 优先用采样时刻的 x25(不受 CFI 链污染)
     uintptr_t origXRefs = (sampleXRefs_ != 0) ? sampleXRefs_ : (*regs_)[25];
 #endif
     MAYBE_UNUSED bool noCallerInCfi = false;
-    // True when this frame had no unwind table at all (the else path below).
-    // The LR fallback is only allowed for such frames and runs AFTER
-    // StepNterp/TryJitStep: an anonymous executable pc (e.g. in the ART JIT
-    // cache) must get its JIT step first, because that is the only fallback
-    // which also restores sp/fp correctly. An LR fallback cannot update sp/fp,
-    // so the next frame is evaluated with a stale sp and produces garbage.
+    // 本帧完全没有回溯表时为 true(下方 else 分支)。LR 兜底只允许用于
+    // 这类帧,且排在 StepNterp/TryJitStep 之后:匿名可执行区的 pc(如
+    // ART JIT 缓存内)必须先做 JIT 步进——那是唯一能同时正确恢复 sp/fp
+    // 的兜底。LR 兜底无法更新 sp/fp,下一帧只能拿陈旧 sp 求值,产出垃圾。
     MAYBE_UNUSED bool noUnwindTable = !unwinderResult;
     if (unwinderResult) {
 #if defined(__arm__) || defined(__aarch64__)
@@ -1833,13 +1803,12 @@ void Unwinder::Impl::UpdateRegsState(
 #endif
     uint16_t applyErrCode = 0;
     unwinderResult = Apply(regs_, rs, applyErrCode);
-    // The CFI explicitly says this frame has no caller (DW_CFA_undefined on the
-    // return-address register; typical for noreturn / outermost frames).
-    // libunwindstack ends the unwind here. Treat it as end-of-stack: falling
-    // through to TryJitStep/FpStep would fabricate frames from stale fp values
-    // (observed as garbage libicu_jni frames after a RETURN_ADDRESS_UNDEFINED
-    // failure, followed by an fp-mode stall loop). StepNterp is still allowed
-    // below: it self-validates (libart map + nterp callee-saves layout).
+    // CFI 明确声明本帧没有调用者(返回地址寄存器上为 DW_CFA_undefined;
+    // 典型于 noreturn/最外层帧)。libunwindstack 到此结束回溯。此处按
+    // 栈底处理:若继续落入 TryJitStep/FpStep,会拿陈旧 fp 伪造帧(实测
+    // 为 RETURN_ADDRESS_UNDEFINED 失败后出现垃圾 libicu_jni 帧,随后
+    // fp 模式卡死循环)。下方仍允许 StepNterp:它自带校验(libart 映射 +
+    // nterp 被调用者保存帧布局)。
     if (!unwinderResult && applyErrCode == UNW_ERROR_RETURN_ADDRESS_UNDEFINED) {
         noCallerInCfi = true;
     }
@@ -1855,9 +1824,9 @@ void Unwinder::Impl::UpdateRegsState(
     }
 #endif
     } else {
-        // No unwind table for this frame. The LR fallback used to run here,
-        // before StepNterp/TryJitStep; it now runs after them (see below) so
-        // JIT-cache frames are stepped with correct sp/fp first.
+        // 本帧没有回溯表。LR 兜底原来在这里、StepNterp/TryJitStep 之前
+        // 执行;现已移到它们之后(见下),让 JIT 缓存帧先以正确的 sp/fp
+        // 完成步进。
     }
     regs_->SetPc(StripPac(regs_->GetPc(), pacMask_));
 
@@ -1878,22 +1847,18 @@ void Unwinder::Impl::UpdateRegsState(
         }
     }
 #endif
-    // LR fallback, last resort before FpStep (only for frames without an
-    // unwind table; see noUnwindTable). In fp step mode DWARF no longer runs,
-    // so LR is frozen at the value captured when fp mode was entered — using
-    // it would repeatedly pull pc back to that stale LR and form a 2-cycle
-    // with FpStep, so it is skipped in fp mode.
-    // LR is only refreshed by a successful DWARF Apply (x30 rule); FpStep and
-    // StepNterp leave it untouched. Falling back to an already-consumed LR makes
-    // no progress (the pc only oscillates between lr and lr-4 through DoPcAdjust,
-    // which also defeats the pc==lr guard inside SetPcFromReturnAddress), so each
-    // LR value is consumed at most once per unwind. Also reject when the target
-    // equals the current pc: the frame's pc typically came from the same RA stack
-    // slot Apply just restored into LR, and PAC plus the ±4 DoPcAdjust hide this
-    // equality from the pc==lr guard inside SetPcFromReturnAddress; such a
-    // fallback reproduces the identical frame and ends the unwind at
-    // UnwindFrame's repeated-frame check. A rejected fallback keeps
-    // unwinderResult false so FpStep still gets a chance to run.
+    // LR 兜底,FpStep 之前的最后手段(只用于无回溯表的帧;见
+    // noUnwindTable)。fp 步进模式下 DWARF 不再运行,LR 冻结在进入 fp
+    // 模式时的取值——用它只会反复把 pc 拉回那个陈旧 LR,与 FpStep 构成
+    // 二帧循环,故 fp 模式下跳过。
+    // LR 只在 DWARF Apply 成功时经 x30 规则刷新;FpStep 与 StepNterp 不
+    // 碰它。对已消费过的 LR 再兜底毫无进展(pc 只会在 lr 与 lr-4 之间经
+    // DoPcAdjust 振荡,同时绕过 SetPcFromReturnAddress 内部的 pc==lr 守
+    // 卫),故每个 LR 值每次回溯至多消费一次。目标等于当前 pc 时同样拒绝:
+    // 本帧 pc 通常正来自 Apply 刚恢复进 LR 的那个 RA 栈槽,PAC 加 ±4 的
+    // DoPcAdjust 会让 SetPcFromReturnAddress 里的 pc==lr 守卫看不出这一
+    // 相等;这种兜底只会复现同一帧,最终止步于 UnwindFrame 的重复帧检查。
+    // 被拒绝的兜底保持 unwinderResult 为 false,FpStep 仍有机会接着跑。
     if (!unwinderResult && noUnwindTable && enableLrFallback_ && !isResetFrames_ && !isFpStep_) {
         uintptr_t pcBefore = regs_->GetPc();
         if (regs_->SetPcFromReturnAddress(memory_)) {
@@ -1905,21 +1870,19 @@ void Unwinder::Impl::UpdateRegsState(
                 DFXLOGU("LR fallback: old_pc=%{private}p -> new_pc=%{private}p",
                     reinterpret_cast<void *>(frame.pc), reinterpret_cast<void *>(regs_->GetPc()));
             } else {
-                // Stale or no-op LR: restore pc, do not claim success.
+                // 陈旧或无操作的 LR:恢复 pc,不宣称成功。
                 regs_->SetPc(pcBefore);
                 DFXLOGU("LR fallback skipped: stale or no-op lr %{private}p", reinterpret_cast<void *>(fallbackPc));
             }
         }
     }
 #if defined(__aarch64__) || defined(__x86_64__)
-    // try fp. Skip for vDSO-type maps (IsVdsoMap covers [vdso] and [shmm]):
-    // these pseudo-mappings are parsed as in-memory ELF by VdsoElfFactory and,
-    // when that yields no unwind table, the frame pointer register does not hold
-    // a reliable frame pointer (the code is a kernel/shared-memory stub, not
-    // frame-pointer-compiled user code). Chasing [fp] there fabricates garbage
-    // frames from stack residue and, by marking the step successful, also blocks
-    // the bounded StepByScan fallback below. The ART JIT cache (fp==0) already
-    // fast-fails FpStep, so it is unaffected.
+    // 尝试 fp。vDSO 类映射跳过(IsVdsoMap 覆盖 [vdso] 与 [shmm]):这类
+    // 伪映射由 VdsoElfFactory 按内存 ELF 解析,若解析不出回溯表,帧指针
+    // 寄存器里就不会是可靠的帧指针(其代码是内核/共享内存桩,不是按帧
+    // 指针编译的用户代码)。在那里追 [fp] 会拿栈残留伪造垃圾帧,且因步进
+    // 被标记成功,还会挡住下方有界的 StepByScan 兜底。ART JIT 缓存
+    // (fp==0) 本来就会让 FpStep 快速失败,不受影响。
     if (!unwinderResult && !noCallerInCfi &&
         !(frameMap != nullptr && frameMap->IsVdsoMap())) {
         unwinderResult = FpStep(frame.fp, frame.pc, ctx);
@@ -1933,18 +1896,17 @@ void Unwinder::Impl::UpdateRegsState(
             }
             isFpStep_ = true;
         } else if (!unwinderResult && isFpStep_) {
-            // The fp chain is broken (e.g. the next fp did not increase). Leave fp
-            // mode so the next frame retries DWARF: in fp mode StepInner skips
-            // ParseUnwindTable entirely, so a broken chain would otherwise stall
-            // the unwind with no way out. If DWARF (and the other fallbacks) also
-            // fail, UnwindFrame's repeated-frame guard terminates the unwind.
+            // fp 链已断(例如下一个 fp 不再增长)。退出 fp 模式让下一帧
+            // 重试 DWARF:fp 模式下 StepInner 完全跳过 ParseUnwindTable,
+            // 链断后回溯会卡死无解。若 DWARF(及其他兜底)也失败,
+            // UnwindFrame 的重复帧守卫会终止回溯。
             isFpStep_ = false;
         }
     }
     if (!unwinderResult && enableScanStep_ && scanUsedCount_ < MAX_SCAN_STEPS) {
-        // Stack scan, final fallback after all strategies failed. Bounded by
-        // MAX_SCAN_STEPS per unwind; a scanned frame is a best-effort guess
-        // (stack residue may cause a jump), so it is opt-in (default off).
+        // 栈扫描,所有策略失败后的最终兜底。每次回溯受 MAX_SCAN_STEPS
+        // 限制;扫描帧只是尽力猜测(栈残留可能导致跳帧),故默认关闭、
+        // 需显式开启。
         scanUsedCount_++;
         unwinderResult = StepByScan(frame.sp, StripPac(regs_->GetPc(), pacMask_));
         if (unwinderResult) {
@@ -1990,9 +1952,9 @@ void Unwinder::Impl::UpdateCache(uintptr_t pc, bool hasRegLocState, const std::s
     const std::shared_ptr<DfxMap>& map)
 {
     if (hasRegLocState && enableCache_) {
-        // bound the cache: pcs are mostly unique across samples (hiperf
-        // post-pass), so a full clear loses almost nothing. ~64K entries
-        // ≈ 3-4 MB including node overhead (sizeof(StepCache)=16B).
+        // 给缓存设上限:跨样本的 pc 几乎全不重复(hiperf 后处理),整表
+        // 清空几乎无损失。约 64K 项 ≈ 3-4MB(含节点开销,
+        // sizeof(StepCache)=16B)。
         constexpr size_t kMaxStepCacheEntries = 65536;
         if (stepCache_.size() >= kMaxStepCacheEntries) {
             stepCache_.clear();
@@ -2010,11 +1972,10 @@ bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ct
         DFXLOGE("params is nullptr");
         return false;
     }
-    // AOSP16-style: if a previous DWARF Step set dex_pc (via the DEX1 magic
-    // marker in libart.so's CFI for nterp_helper), inject a virtual DEX
-    // frame BEFORE the current native frame is added. The dex_pc points
-    // into a mapped DEX/vdex/apk/jar file and represents the interpreted
-    // Java method's current PC. Must run before any AddFrame call below.
+    // AOSP16 风格:若上一次 DWARF Step 设置了 dex_pc(经 libart.so 中
+    // nterp_helper 的 CFI 里的 DEX1 魔数标记),在加入当前本机帧之前先
+    // 注入虚拟 DEX 帧。dex_pc 指向已映射的 DEX/vdex/apk/jar 文件,代表
+    // 解释执行 Java 方法的当前 PC。必须先于下方任何 AddFrame 调用执行。
     InjectDexFrameFromDwarf();
     SetLocalStackCheck(ctx, false);
     DFXLOGU("+pc: %{public}p, sp: %{public}p, fp: %{public}p", reinterpret_cast<void *>(frame.pc),
@@ -2076,10 +2037,10 @@ bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ct
     if (!CheckFrameValid(frame, map, prevSp)) {
         return false;
     }
-    // hasRegLocState is true when DWARF succeeds.
-    // UpdateRegsState may succeed via LR fallback or JIT step even if DWARF fails.
-    // In those cases, frame.pc/sp/fp have been updated to the next frame's values,
-    // so we should return true to continue unwinding.
+    // hasRegLocState 为 true 表示 DWARF 成功。
+    // UpdateRegsState 在 DWARF 失败时也可能经 LR 兜底或 JIT 步进成功。
+    // 那种情况下 frame.pc/sp/fp 已更新为下一帧的值,应返回 true 继续
+    // 回溯。
     if (hasRegLocState || frame.pc != prevPc) {
         return true;
     }
@@ -2097,12 +2058,10 @@ bool Unwinder::Impl::Apply(std::shared_ptr<DfxRegs> regs, std::shared_ptr<RegLoc
     uintptr_t prevPc = regs->GetPc();
     uintptr_t prevSp = regs->GetSp();
     bool ret = DfxInstructions::Apply(memory_, *(regs.get()), *(rs.get()), errCode);
-    // Do NOT verify that the new SP is readable after a successful DWARF
-    // Apply: the return-address register can be correct while the
-    // CFA-derived SP is not a usable stack value (nterp_helper's CFA is
-    // computed from the live xREFS register). A bogus SP terminates the
-    // unwind on its own: reads through it fail on the next steps, and the
-    // next frame recomputes its own SP from its own CFI.
+    // DWARF Apply 成功后不要再校验新 SP 可读:返回地址寄存器可能正确,
+    // 而 CFA 推出的 SP 不是可用栈值(nterp_helper 的 CFA 由存活的 xREFS
+    // 寄存器计算)。坏 SP 自会终止回溯:后续经它的读取都会失败,且下一帧
+    // 会按自己的 CFI 重算自己的 SP。
     if (StripPac(regs->GetPc(), pacMask_) == prevPc && regs->GetSp() == prevSp) {
         DFXLOGU("Apply: repeated frame, pc=0x%{public}" PRIx64 ", sp=0x%{public}" PRIx64
             "", (uint64_t)prevPc, (uint64_t)prevSp);
@@ -2243,8 +2202,9 @@ void Unwinder::Impl::ParseFrameSymbol(DfxFrame& frame)
 
 void Unwinder::Impl::TryJitSymbolLookup(DfxFrame& frame)
 {
-    // See IsFileBackedMapName: a pc in a named file mapping cannot be JIT code,
-    // so the JIT symbol registry cannot contain it either.
+    // 符号化兜底:map 拿不到 elf 时(匿名可执行区)查 JIT 注册表。
+    // 见 IsFileBackedMapName:有名文件映射里的 pc 不可能是 JIT 代码,
+    // JIT 符号注册表里也不可能有它,直接跳过。
     if (frame.map != nullptr && IsFileBackedMapName(frame.map->name)) {
         return;
     }
@@ -2301,8 +2261,9 @@ void Unwinder::Impl::TryJitSymbolLookup(DfxFrame& frame)
 bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
 {
     DFX_TRACE_SCOPED_DLSYM("TryJitStep:%p", reinterpret_cast<void *>(pc));
-    // JIT-compiled code never lives in a named file mapping (see IsFileBackedMapName),
-    // so skip the registry scan for such pcs before doing any work.
+    // JIT 步进:pc 落在 JIT 代码里时,取 JIT ELF 的回溯表走一步。
+    // JIT 编译代码从不存在于有名文件映射(见 IsFileBackedMapName),
+    // 这类 pc 先行跳过注册表扫描,不做任何工作。
     if (maps_ != nullptr) {
         std::shared_ptr<DfxMap> map;
         if (memory_->GetMapByPc(pc, map) == UNW_ERROR_NONE && map != nullptr &&
@@ -2387,10 +2348,10 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
 {
     DFX_TRACE_SCOPED_DLSYM("StepNterp:%p", reinterpret_cast<void *>(pc));
 #if defined(__aarch64__)
-    // Only handle ARM64 nterp_helper / art_quick_nterp_* frames in libart.so/libartd.so.
-    // Use origSp (the SP before Apply corrupted it) because Apply may have set regs_->sp
-    // to a bad CFA value before returning false. Similarly, use saved x22/x25 because
-    // Apply's Flush may have overwritten them.
+    // 只处理 libart.so/libartd.so 内的 ARM64 nterp_helper /
+    // art_quick_nterp_* 帧。用 origSp(Apply 污染之前的 SP),因为 Apply
+    // 可能在返回 false 前已把 regs_->sp 设成坏 CFA 值;同理用保存下来的
+    // x22/x25,因为 Apply 的 Flush 可能已把它们改写。
     if (maps_ == nullptr || memory_ == nullptr || regs_ == nullptr) {
         return false;
     }
@@ -2400,46 +2361,41 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
         return false;
     }
 
-    // Must be in libart.so / libartd.so. nterp_helper is an ART interpreter
-    // entry that lives in libart.so. Without this guard, a misclassified
-    // frame in some other .so could be wrongly treated as nterp.
+    // 必须位于 libart.so / libartd.so。nterp_helper 是 libart.so 内的
+    // ART 解释器入口。没有这道守卫,其他 .so 里被误判的帧可能被错当
+    // 成 nterp。
     auto pos = map->name.rfind('/');
     std::string baseName = (pos == std::string::npos) ? map->name : map->name.substr(pos + 1);
     if (baseName != "libart.so" && baseName != "libartd.so") {
         return false;
     }
 
-    // Identify nterp frames WITHOUT relying on libart.so's symbol table.
-    // nterp_helper is a static (non-exported) symbol, so it is absent from
-    // .dynsym, and release builds of libart.so usually strip .symtab as well.
-    // Symbol-name matching (GetFuncNameAndOffsetByPc) therefore fails on
-    // production libart.so, which breaks the ART-interpreter crossing.
+    // 不依赖 libart.so 符号表识别 nterp 帧。nterp_helper 是静态(未导出)
+    // 符号,.dynsym 里没有;libart.so 发布版通常连 .symtab 也剥掉。因此
+    // 符号名匹配(GetFuncNameAndOffsetByPc)在生产版 libart.so 上必然
+    // 失败,ART 解释器穿越就此断链。
     //
-    // Two signals can identify an nterp frame, in priority order:
-    //   1) regs_->DexPcSeen(): the DWARF CFI for nterp_helper uses the AOSP16
-    //      DEX1 magic marker (DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop) on
-    //      a register rule (val_expression on x0, reading x22). DfxInstructions
-    //      ::Apply raises this flag whenever the magic fires, independently of
-    //      the evaluated dex_pc value. The DEX1 magic is ONLY emitted by ART's
-    //      CFI for nterp_helper, so the flag alone is proof of an nterp frame
-    //      EVEN WHEN the dex_pc value is 0/unmapped (e.g. the live x22 read by
-    //      the val_expression was clobbered to 0 by intermediate compiled/JNI
-    //      frames before the thread reached a syscall). The previous check
-    //      (DexPc() != 0) conflated "magic fired" with "value non-zero" and
-    //      stopped the unwind at nterp_helper whenever x22 happened to be 0.
-    //      DexPcSeen() survives because it is set BEFORE the CFA flush and
-    //      before Apply may fail on an undefined return-address register.
-    //      This is the most reliable signal when DWARF is present at all.
-    //   2) x22 physical register (origDexPc): the live dex_pc while nterp is
-    //      actively interpreting. Used when there is no DEX1 CFI at all
-    //      (older libart.so) or before any DWARF path has run. This path
-    //      still requires the value to map to a DEX-bearing region, since
-    //      otherwise a non-nterp libart.so frame could be misidentified.
+    // 两个信号可识别 nterp 帧,按优先级:
+    //   1) regs_->DexPcSeen():nterp_helper 的 DWARF CFI 在某寄存器规则上
+    //      使用 AOSP16 DEX1 魔数(DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop,
+    //      val_expression 于 x0,读 x22)。魔数一命中 DfxInstructions::
+    //      Apply 就置起该标志,与 dex_pc 求值结果无关。DEX1 魔数只有 ART
+    //      为 nterp_helper 发出的 CFI 才有,所以仅凭该标志即可证明是
+    //      nterp 帧——即使 dex_pc 求值为 0/未映射(例如线程到达系统调用
+    //      前,val_expression 读的存活 x22 已被中间编译帧/JNI 帧改写为
+    //      0)。旧判据(DexPc() != 0)把"魔数命中"与"数值非零"混为一谈,
+    //      x22 碰巧为 0 时回溯就止步于 nterp_helper。DexPcSeen() 能存活,
+    //      是因为它在 CFA flush 之前、Apply 可能因返回地址寄存器
+    //      undefined 而失败之前就已置位。只要 DWARF 存在,这是最可靠的
+    //      信号。
+    //   2) x22 物理寄存器(origDexPc):nterp 正在解释执行时的活 dex_pc。
+    //      用于完全没有 DEX1 CFI(旧版 libart.so)或任何 DWARF 路径尚未
+    //      运行时。此路径仍要求该值映射到 DEX 区域,否则 libart.so 里的
+    //      非 nterp 帧可能被误判。
     //
-    // dex_pc validity only controls the DEX frame injection
-    // (Unwinder::FillInDexFrame semantics). The callee-saves recovery below
-    // always runs once this is identified as an nterp frame; a bogus dex_pc
-    // only suppresses the DEX frame injection — it does not stop the unwind.
+    // dex_pc 有效性只控制 DEX 帧注入(对应 Unwinder::FillInDexFrame 语义)。
+    // 一旦判定为 nterp 帧,下方被调用者保存帧恢复总会执行;dex_pc 有假
+    // 只是不注入 DEX 帧——不会叫停回溯。
     bool dexPcValid = false;
     std::string dexMapName;
     std::shared_ptr<DfxMap> dexMap;
@@ -2451,29 +2407,24 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
         if (maps_->FindMapByAddr(static_cast<uintptr_t>(effectiveDexPc), dexMap) && dexMap != nullptr) {
             const std::string& n = dexMap->name;
             dexMapName = n;
-            // Common DEX containers. Use substring match for .vdex because
-            // dex2oat emits transient files like "base.vdex.<hash>.tmp" before
-            // renaming to the canonical "base.vdex", so a strict suffix match
-            // on ".vdex.tmp" would miss the production form.
+            // 常见 DEX 容器。.vdex 用子串匹配:dex2oat 会先产出
+            // "base.vdex.<hash>.tmp" 这类临时文件再改名为正式的
+            // "base.vdex",严格后缀匹配 ".vdex.tmp" 会漏掉正式形态。
             dexPcValid = n.find(".vdex") != std::string::npos ||
                        EndsWith(n, ".dex") || EndsWith(n, ".apk") ||
                        StartsWith(n, "[anon:dalvik") ||
-                       // DEX extracted into an anonymous mapping has an empty
-                       // name; require the page to be executable so we don't
-                       // match arbitrary read/write anon regions.
+                       // 抽取到匿名映射的 DEX 名字为空;要求页面可执行,
+                       // 避免匹配到任意读写的匿名区域。
                        (n.empty() && dexMap->IsMapExec());
         }
     }
-    // DEX1 magic fired => definitely an nterp frame (the magic is only
-    // emitted by ART's CFI for nterp_helper), even if the dex_pc value is 0
-    // or unmapped (e.g. live x22 was clobbered to 0 by an intermediate
-    // compiled/JNI frame before the thread reached a syscall). DexPcSeen()
-    // tracks the magic hit independently of the value, so we still enter the
-    // callee-saves recovery and read the saved x22 at [saved_sp+88]. Using
-    // DexPc()!=0 here (the old check) would miss the x22==0 case and stop the
-    // unwind at nterp_helper. Otherwise, fall back to requiring a valid
-    // DEX-mapped dex_pc (the original signal) so we don't misclassify other
-    // libart.so frames (e.g. GC, JIT) as nterp.
+    // DEX1 魔数命中 => 必是 nterp 帧(该魔数只有 ART 为 nterp_helper 的
+    // CFI 才发),即使 dex_pc 为 0 或未映射(如线程到达系统调用前,活的
+    // x22 已被中间编译帧/JNI 帧改写为 0)。DexPcSeen() 独立于数值记录
+    // 魔数命中,所以仍进入被调用者保存帧恢复,读 [saved_sp+88] 处保存的
+    // x22。此处若用 DexPc()!=0(旧判据)会漏掉 x22==0 的情形,回溯止步
+    // 于 nterp_helper。否则退回要求 dex_pc 有效映射到 DEX 区(最初信号),
+    // 避免把 libart.so 里其他帧(如 GC、JIT)误判为 nterp。
     bool isNterp = regs_->DexPcSeen() || dexPcValid;
     if (!isNterp) {
         DFXLOGU("StepNterp: not nterp, pc=0x%{public}" PRIx64 ", dexPc=0x%{public}" PRIx64
@@ -2482,54 +2433,53 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
             (uint64_t)regs_->DexPc(), (uint64_t)origDexPc, dexMapName.c_str());
         return false;
     }
-    // Consume the DWARF pseudo-register so InjectDexFrameFromDwarf on the next
-    // StepInner iteration does not inject a duplicate DEX frame for the same
-    // dex_pc. We inject it ourselves below.
+    // 消费掉 DWARF 伪寄存器,防止下一次 StepInner 迭代里
+    // InjectDexFrameFromDwarf 为同一 dex_pc 重复注入 DEX 帧。
+    // 我们自己在下方注入。
     regs_->ClearDexPc();
 
     DFXLOGU("StepNterp: hit nterp frame, pc=0x%{public}" PRIx64 ", dexPc=0x%{public}" PRIx64
         " (valid=%{public}d), dexMap=%{public}s, origSp=0x%{public}" PRIx64 "",
         (uint64_t)pc, (uint64_t)effectiveDexPc, (int)dexPcValid, dexMapName.c_str(), (uint64_t)origSp);
 
-    // ARM64 nterp register allocation (from art/runtime/interpreter/mterp/arm64ng/main.S):
-    //   x22 (xPC)   = interpreted program counter (DEX PC, absolute address in mapped DEX)
-    //   x25 (xREFS) = base of object references of dex registers
+    // ARM64 nterp 寄存器分配(出自 art/runtime/interpreter/mterp/arm64ng/
+    // main.S):
+    //   x22 (xPC)   = 解释器程序计数器(DEX PC,已映射 DEX 内的绝对地址)
+    //   x25 (xREFS) = dex 寄存器对象引用区基址
     //
-    // ARM64 nterp callee-saves frame layout (SAVE_ALL_CALLEE_SAVES /
-    // RESTORE_ALL_CALLEE_SAVES in art/runtime/interpreter/mterp/arm64ng/main.S):
-    //   [xREFS - 8]       = saved SP (base of callee-saves area)
-    //   [saved_sp + 0..56] = d8..d15 (FP callee-saves)
-    //   [saved_sp + 64]   = x19 (saved, not restored by nterp)
-    //   [saved_sp + 72]   = x20 (saved, not restored by nterp)
-    //   [saved_sp + 80]   = x21 (saved, not restored by nterp)
-    //   [saved_sp + 88]   = x22 (xPC / DEX PC)   <-- saved DEX PC lives here
-    //   [saved_sp + 96]   = x23
-    //   [saved_sp + 104]  = x24
-    //   [saved_sp + 112]  = x25 (xREFS)
-    //   [saved_sp + 120]  = x26
-    //   [saved_sp + 128]  = x27
-    //   [saved_sp + 136]  = x28
-    //   [saved_sp + 144]  = x29 (FP)
-    //   [saved_sp + 152]  = lr (return address to native caller)
-    //   Spill slots end at +160; the frame size CALLEE_SAVES_SIZE is 176
-    //   (the top 16 bytes are slack):
-    //   caller's SP       = saved_sp + 176
+    // ARM64 nterp 被调用者保存帧布局(main.S 的 SAVE_ALL_CALLEE_SAVES /
+    // RESTORE_ALL_CALLEE_SAVES):
+    //   [xREFS - 8]        = 保存的 SP(被调用者保存区基址)
+    //   [saved_sp + 0..56] = d8..d15(浮点被调用者保存)
+    //   [saved_sp + 64]    = x19(有保存,nterp 不恢复)
+    //   [saved_sp + 72]    = x20(有保存,nterp 不恢复)
+    //   [saved_sp + 80]    = x21(有保存,nterp 不恢复)
+    //   [saved_sp + 88]    = x22(xPC / DEX PC)   <-- 保存的 DEX PC 在此
+    //   [saved_sp + 96]    = x23
+    //   [saved_sp + 104]   = x24
+    //   [saved_sp + 112]   = x25 (xREFS)
+    //   [saved_sp + 120]   = x26
+    //   [saved_sp + 128]   = x27
+    //   [saved_sp + 136]   = x28
+    //   [saved_sp + 144]   = x29 (FP)
+    //   [saved_sp + 152]   = lr(返回本机调用者的地址)
+    //   溢出槽到 +160 结束;帧大小 CALLEE_SAVES_SIZE = 176(顶部 16 字节
+    //   是留白):
+    //   调用者 SP          = saved_sp + 176
     //
-    // The live DEX PC lives in register x22 while nterp is actively
-    // interpreting. After nterp_helper calls out into compiled/OAT/JNI
-    // code, the captured x22 can hold a mid-function value of an inner
-    // frame, so the DWARF DEX1 magic can evaluate to a bogus dex_pc. The
-    // real DEX PC was spilled at [saved_sp + 88] before the call-out and is
-    // recovered from there. Inject a virtual DEX frame for the interpreted
-    // Java method, then set regs to the native caller (lr / caller's SP).
-    uintptr_t xRefs = origXRefs; // x25 saved before Apply
+    // nterp 正在解释执行时,活 DEX PC 在寄存器 x22。nterp_helper 调出至
+    // 编译/OAT/JNI 代码后,捕获到的 x22 可能是某个内层帧的函数中值,
+    // DWARF DEX1 魔数因此可能求出假 dex_pc。真正的 DEX PC 在调出前已
+    // 溢出到 [saved_sp + 88],从那里恢复。先为解释执行的 Java 方法注入
+    // 虚拟 DEX 帧,再把 regs 设到本机调用者(lr / 调用者 SP)。
+    uintptr_t xRefs = origXRefs; // Apply 前保存的 x25
     DFXLOGU("StepNterp: dexPc=0x%{public}" PRIx64 ", x25(xREFS)=0x%{public}" PRIx64 "",
         (uint64_t)effectiveDexPc, (uint64_t)xRefs);
 
-    // Read saved SP from [xREFS - 8] to locate the callee-saves frame base.
+    // 从 [xREFS - 8] 读保存的 SP,定位被调用者保存帧基址。
     uintptr_t savedSp = 0;
     if (xRefs != 0) {
-        uintptr_t refsAddr = xRefs - 8; // 8: saved SP is at [xREFS - 8]
+        uintptr_t refsAddr = xRefs - 8; // 8: 保存的 SP 位于 [xREFS - 8]
         if (!memory_->Read<uintptr_t>(refsAddr, &savedSp, false)) {
             DFXLOGU("StepNterp: failed to read saved_sp at [xREFS-8]=0x%{public}" PRIx64 "", (uint64_t)refsAddr);
             return false;
@@ -2540,20 +2490,19 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
         return false;
     }
 
-    // Read the native return address (lr) from the callee-saves area.
+    // 从被调用者保存区读本机返回地址(lr)。
     uintptr_t nativeLr = 0;
-    uintptr_t lrAddr = savedSp + 152; // 152: offset of lr in callee-saves frame
+    uintptr_t lrAddr = savedSp + 152; // 152: lr 在被调用者保存帧中的偏移
     if (!memory_->Read<uintptr_t>(lrAddr, &nativeLr, false)) {
         DFXLOGU("StepNterp: failed to read native lr at saved_sp+152=0x%{public}" PRIx64 "", (uint64_t)lrAddr);
         return false;
     }
-    uintptr_t nativeSp = savedSp + 176; // 176: CALLEE_SAVES_SIZE on ARM64
+    uintptr_t nativeSp = savedSp + 176; // 176: ARM64 的 CALLEE_SAVES_SIZE
 
-    // Resolve the DEX PC to inject. Prefer the DWARF DEX1 value when it maps
-    // to a DEX-bearing region. Otherwise (x22 was clobbered by an intermediate
-    // compiled/JNI frame) fall back to the saved x22 in the nterp callee-saves
-    // frame at [saved_sp + 88], which nterp_helper spilled before calling out.
-    // 88: offset of x22 (xPC / DEX PC) in the nterp callee-saves frame.
+    // 确定要注入的 DEX PC。DWARF DEX1 值映射到 DEX 区域时优先用之;否则
+    // (x22 被中间编译帧/JNI 帧改写)退回 nterp 被调用者保存帧 [saved_sp
+    // + 88] 处保存的 x22——nterp_helper 调出前溢出在那里的值。
+    // 88:x22(xPC / DEX PC)在 nterp 被调用者保存帧中的偏移。
     uintptr_t dexPc = effectiveDexPc;
     if (!dexPcValid) {
         uintptr_t savedDexPc = 0;
@@ -2595,12 +2544,11 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
         ", native_sp=0x%{public}" PRIx64 ", dex_pc=0x%{public}" PRIx64 "",
         (uint64_t)savedSp, (uint64_t)nativeLr, (uint64_t)nativeSp, (uint64_t)dexPc);
 
-    // Inject a virtual DEX frame for the interpreted Java method (matches AOSP
-    // FillInDexFrame). The DEX frame's PC is the dex_pc (x22), which points into
-    // the mapped DEX file (e.g. inside an .apk/.vdex/.odex mapping). Only inject
-    // when dex_pc actually maps to a DEX-bearing region; otherwise silently
-    // skip (matches AOSP16 libunwindstack FillInDexFrame, which is opportunistic
-    // and never blocks the unwind).
+    // 为解释执行的 Java 方法注入虚拟 DEX 帧(对齐 AOSP FillInDexFrame)。
+    // DEX 帧的 PC 是 dex_pc(x22),指向已映射的 DEX 文件(如 .apk/.vdex/
+    // .odex 映射内部)。仅当 dex_pc 确实映射到 DEX 区域时注入,否则静默
+    // 跳过(对齐 AOSP16 libunwindstack FillInDexFrame 的机会式行为,
+    // 从不阻塞回溯)。
     if (dexPc != 0 && dexPcValid && dexMap != nullptr) {
         StepFrame dexFrame;
         dexFrame.pc = dexPc;
@@ -2615,7 +2563,7 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
             (uint64_t)dexPc);
     }
 
-    // Set regs to the native caller so unwinding continues past nterp_helper.
+    // 把 regs 设为本机调用者,回溯得以穿过 nterp_helper 继续。
     if (nativeLr == 0) {
         DFXLOGU("StepNterp: native_lr is 0, stop unwinding");
         return false;
@@ -2636,15 +2584,14 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
 
 void Unwinder::Impl::InjectDexFrameFromDwarf()
 {
-    // AOSP16 libunwindstack-style: when the DWARF CFI for nterp_helper marks
-    // a register with the DEX1 magic (DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop),
-    // DfxInstructions::Apply stores the evaluated value in regs_->DexPc().
-    // We consume it here to inject a virtual DEX frame (FrameType::DEX_FRAME)
-    // whose PC is the dex_pc, pointing into a mapped DEX/vdex/apk/jar file.
-    // This runs at the top of StepInner, BEFORE the current native frame is
-    // added, so the resulting ordering is:
-    //   ... nterp_helper frame | <injected DEX frame> | caller frame ...
-    // (matches libunwindstack Unwinder::Unwind + FillInDexFrame).
+    // AOSP16 libunwindstack 风格:nterp_helper 的 DWARF CFI 用 DEX1 魔数
+    // (DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop)标记某寄存器时,
+    // DfxInstructions::Apply 会把求值结果存入 regs_->DexPc()。这里消费
+    // 它,注入一个 PC 为 dex_pc、指向已映射 DEX/vdex/apk/jar 文件的虚拟
+    // DEX 帧(FrameType::DEX_FRAME)。运行于 StepInner 顶部、当前本机帧
+    // 加入之前,得到的栈序为:
+    //   ... nterp_helper 帧 | <注入的 DEX 帧> | 调用者帧 ...
+    // (对齐 libunwindstack Unwinder::Unwind + FillInDexFrame)。
     if (regs_ == nullptr) {
         return;
     }
@@ -2653,14 +2600,12 @@ void Unwinder::Impl::InjectDexFrameFromDwarf()
     if (dexPc == 0 && !seen) {
         return;
     }
-    // Consume the DEX1 signal unconditionally (clears both dex_pc and the
-    // seen flag) so it can never leak past this point and misidentify a later
-    // libart.so frame as nterp. When Apply succeeded on the nterp frame but
-    // the evaluated dex_pc was 0 (live x22 clobbered), there is nothing to
-    // inject here; StepNterp only runs when Apply fails, so in that rare
-    // apply-succeeded-but-dex_pc=0 case the DEX frame is skipped and the
-    // unwind simply continues to the native caller (matches AOSP's
-    // opportunistic FillInDexFrame, which never blocks the unwind).
+    // 无条件消费 DEX1 信号(同时清 dex_pc 与 seen 标志),它绝不能泄漏到
+    // 此处之后,把后续某个 libart.so 帧误判成 nterp。若 nterp 帧上 Apply
+    // 成功但求值的 dex_pc 为 0(活 x22 被改写),这里无帧可注入;
+    // StepNterp 只在 Apply 失败时运行,所以在"Apply 成功但 dex_pc=0"的
+    // 少见情形下跳过 DEX 帧、直接继续到本机调用者即可(对齐 AOSP 机会式
+    // 的 FillInDexFrame,从不阻塞回溯)。
     regs_->ClearDexPc();
     if (dexPc == 0) {
         DFXLOGU("InjectDexFrame: DEX1 magic seen but dex_pc=0, skip frame (signal consumed)");
@@ -2724,12 +2669,10 @@ void Unwinder::Impl::FillFrame(DfxFrame& frame, bool needSymParse)
 
 void Unwinder::Impl::FillDexFrame(DfxFrame& frame)
 {
-    // DEX frames are injected by StepNterp to represent interpreted Java methods.
-    // The PC is the dex_pc (x22 register), which points into a mapped DEX file
-    // (e.g. inside an .apk/.vdex/.odex mapping). We must NOT try to load an ELF
-    // from this mapping — just compute rel_pc = pc - map->begin, and set the
-    // map offset so the output shows the correct file offset (matches AOSP
-    // FillInDexFrame behaviour).
+    // DEX 帧由 StepNterp 注入,代表解释执行的 Java 方法。其 PC 是 dex_pc
+    // (x22 寄存器),指向已映射的 DEX 文件(如 .apk/.vdex/.odex 映射内部)。
+    // 绝不能对该映射尝试加载 ELF——只算 rel_pc = pc - map->begin,并设置
+    // map offset 让输出显示正确的文件偏移(对齐 AOSP FillInDexFrame 行为)。
     if (frame.map == nullptr) {
         frame.relPc = frame.pc;
         frame.mapName = "Not mapped";

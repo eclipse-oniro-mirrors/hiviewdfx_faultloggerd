@@ -38,23 +38,22 @@ AddressType DwarfOp<AddressType>::Eval(DfxRegs& regs, AddressType initStackValue
     DFXLOGU("DwarfOp::Eval: start, initStackValue=0x%{public}" PRIx64 ", startPtr=0x%{public}" PRIx64 ", length=%{public}" PRIu64 ", end=0x%{public}" PRIx64 "",
         (uint64_t)initStackValue, (uint64_t)startPtr, (uint64_t)length, (uint64_t)end);
 
-    // AOSP16-style DEX1 magic detection.
-    // Pattern: DW_OP_const4u (0x0c) 'D' 'E' 'X' '1' DW_OP_drop (0x13)
-    // These 6 bytes have no net effect on the stack (push 0x31584544, then pop).
-    // Their purpose is to signal that the expression result is the dex_pc of
-    // an interpreted Java method and should be stored in the dex_pc pseudo-register
-    // instead of the normal register. Matches libunwindstack DwarfOp::Eval.
-    if (end > addr && (end - addr) >= 6) { // 6: 1-byte opcode + 4-byte operand + 1-byte opcode
+    // AOSP16 风格 DEX1 魔数检测。
+    // 模式:DW_OP_const4u (0x0c) 'D' 'E' 'X' '1' DW_OP_drop (0x13)
+    // 这 6 个字节对栈无净效果(先压 0x31584544 再弹出)。
+    // 其作用是标记:表达式结果是解释执行 Java 方法的 dex_pc,应存入
+    // dex_pc 伪寄存器而非普通寄存器。对齐 libunwindstack DwarfOp::Eval。
+    if (end > addr && (end - addr) >= 6) { // 6:1 字节操作码 + 4 字节操作数 + 1 字节操作码
         uintptr_t probe = addr;
         uint8_t op1 = 0;
         if (memory_->Read<uint8_t>(probe, &op1, true) && op1 == 0x0c) { // DW_OP_const4u
             uint32_t magic = 0;
             if (memory_->Read<uint32_t>(probe, &magic, true) &&
-                magic == 0x31584544U) { // 'D' 'E' 'X' '1' little-endian
+                magic == 0x31584544U) { // 'D' 'E' 'X' '1' 小端
                 uint8_t op2 = 0;
                 if (memory_->Read<uint8_t>(probe, &op2, true) && op2 == 0x13) { // DW_OP_drop
                     dex_pc_set_ = true;
-                    addr = probe; // skip the magic bytes
+                    addr = probe; // 跳过魔数字节
                    DFXLOGU("DwarfOp::Eval: DEX1 magic detected, dex_pc will be set, addr after magic=0x%{public}" PRIx64 ", end=0x%{public}" PRIx64 ", remaining=%{public}" PRIu64 "",
                        (uint64_t)addr, (uint64_t)end, (uint64_t)(end - addr));
                 }

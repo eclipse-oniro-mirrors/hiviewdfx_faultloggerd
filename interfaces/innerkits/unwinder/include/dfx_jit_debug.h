@@ -40,11 +40,15 @@ struct JitCodeEntry {
     uint64_t timestamp;
     uint32_t seqlock;
 };
-// Layout must match libunwindstack GlobalDebugImpl<Elf, uint64_t, Uint64_A> for ARM64.
+// JIT 代码链表节点(存在于目标进程内存中,须远程逐字段读取)。
+// 布局必须与 libunwindstack ARM64 的 GlobalDebugImpl<Elf, uint64_t, Uint64_A> 一致。
 static_assert(offsetof(JitCodeEntry, symfileSize) == 24, "JIT code entry layout mismatch");
 static_assert(offsetof(JitCodeEntry, seqlock) == 40, "JIT code entry layout mismatch");
 static_assert(sizeof(JitCodeEntry) == 48, "JIT code entry layout mismatch");
 
+// JIT 描述符(libart 发布的全局变量 __jit_debug_descriptor):JIT 代码链表头,
+// firstEntry 指向首个 JitCodeEntry;magic 为 "Android2" 表示启用
+// 时间戳+seqlock 防竞争扩展。
 struct JitDescriptor {
     uint32_t version;
     uint32_t actionFlag;
@@ -60,6 +64,8 @@ struct JitDescriptor {
 static_assert(offsetof(JitDescriptor, magic) == 24, "JIT descriptor layout mismatch");
 static_assert(sizeof(JitDescriptor) == 56, "JIT descriptor layout mismatch");
 
+// 表项身份标识:地址+读取时的 seqlock。GC 后 JIT 代码缓存地址可能复用,
+// 仅凭地址会把新 ELF 误当旧缓存,seqlock 用于区分同一地址的新旧版本。
 struct JitUID {
     uint64_t address;
     uint32_t seqlock;
@@ -70,6 +76,7 @@ struct JitUID {
     }
 };
 
+// 命中后返回给调用方的 JIT 符号信息(ELF+loadBias+PC 区间)。
 struct JitSymbolInfo {
     std::shared_ptr<DfxElf> elf;
     uint64_t loadBias;
@@ -79,9 +86,8 @@ struct JitSymbolInfo {
 
 class DfxJitDebug {
 public:
-    // Owned per Unwinder (one DfxJitDebug per unwind session): the cached
-    // descriptor and elf entries are bound to that session's target pid, so a
-    // process-global instance would leak state across pids.
+    // 归属单个 Unwinder(每次回溯会话一个 DfxJitDebug 实例):缓存的描述符
+    // 与 elf 表项都绑定该会话的目标 pid,做成进程级单例会跨 pid 泄漏状态。
     DfxJitDebug() = default;
     ~DfxJitDebug() = default;
     void SetMemory(const std::shared_ptr<DfxMemory>& memory);
@@ -99,20 +105,18 @@ private:
     DfxJitDebug(const DfxJitDebug&) = delete;
     DfxJitDebug& operator=(const DfxJitDebug&) = delete;
 
-    // Outcome of a descriptor search, used to decide whether the per-pid failure
-    // cache may be updated (see EnsureJitDescriptorLocked).
+    // 描述符查找结果,用于决定是否更新按 pid 记录的失败缓存
+    // (见 EnsureJitDescriptorLocked)。
     enum class JitDescriptorStatus {
-        FOUND,        // descriptor located, descriptorAddr_ is valid
-        RETRY_LATER,  // transient condition (maps not set yet): not conclusive for this pid
-        NOT_PRESENT,  // searched with valid maps: conclusively absent for this pid
+        FOUND,        // 已找到描述符,descriptorAddr_ 有效
+        RETRY_LATER,  // 暂态条件(maps 尚未设置):对本 pid 无结论
+        NOT_PRESENT,  // 已在有效 maps 下搜索:本 pid 确定不存在
     };
 
-    // Caller must hold lock_. Locates the descriptor if not yet known. Only
-    // conclusive failures (NOT_PRESENT) update descriptorCheckedPid_: libart is
-    // loaded at process start and never unloads, so a completed search is final,
-    // while transient conditions such as maps being null must stay retryable —
-    // caching one would blind every later JIT lookup for this pid for the rest
-    // of the session.
+    // 调用方须持有 lock_。描述符未知时执行定位。只有确定性失败(NOT_PRESENT)
+    // 才写入 descriptorCheckedPid_:libart 随进程启动加载且永不卸载,搜索完成
+    // 即是终局;而 maps 为空之类的暂态条件必须保持可重试——若把暂态失败也
+    // 缓存,本 pid 在会话剩余时间内的所有 JIT 查找都会被"致盲"。
     bool EnsureJitDescriptorLocked();
 
     JitDescriptorStatus FindJitDescriptor();
@@ -139,10 +143,9 @@ private:
 
     std::mutex lock_;
     uint64_t descriptorAddr_ = 0;
-    // pid for which FindJitDescriptor has conclusively failed (NOT_PRESENT).
-    // Without this, every FindJitElf call on a non-ART process rescans all maps
-    // and retries opening libart.so, flooding logs and wasting time on the
-    // DWARF-failure fallback path. Transient failures are never cached here.
+    // FindJitDescriptor 已确定性失败(NOT_PRESENT)的 pid。没有它,非 ART
+    // 进程每次 FindJitElf 都要重扫全部 maps 并重试打开 libart.so,在
+    // DWARF 失败兜底路径上刷爆日志、白白耗时。暂态失败从不写入此缓存。
     pid_t descriptorCheckedPid_ = -1;
     uint32_t jitEntrySize_ = 0;
     uint32_t seqlockOffset_ = 0;

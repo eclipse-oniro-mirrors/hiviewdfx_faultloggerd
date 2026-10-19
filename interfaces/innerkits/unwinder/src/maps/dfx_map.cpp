@@ -305,11 +305,10 @@ bool DfxMap::IsArkWebJsExecutable()
 
 bool DfxMap::IsVdsoMap()
 {
-    // Match both the bare "[shmm]"/"[vdso]" form and the /proc/<pid>/root-
-    // prefixed form (map names may be stored as "/proc/<pid>/root[shmm]" after
-    // sandbox path formatting). An exact == check would miss the prefixed form,
-    // so the FpStep gate (UpdateRegsState) would not skip these pseudo-maps and
-    // would garbage-chase the frame pointer, stopping the unwind at 2 frames.
+    // 同时匹配裸 "[shmm]"/"[vdso]" 与带 /proc/<pid>/root 前缀的形态
+    // (沙箱路径格式化后 map 名可能存成 "/proc/<pid>/root[shmm]")。精确
+    // == 会漏掉前缀形态,FpStep 门控(UpdateRegsState)便不会跳过这些
+    // 伪映射,追帧指针追出垃圾,回溯止步于 2 帧。
     if (IsMapExec() && (EndsWith(name, "[shmm]") || EndsWith(name, "[vdso]"))) {
         return true;
     }
@@ -372,7 +371,7 @@ const std::shared_ptr<DfxHap> DfxMap::GetHap()
 const std::shared_ptr<DfxElf> DfxMap::GetElf(pid_t pid)
 {
     std::lock_guard<std::mutex> lock(*elfMutex_);
-    if (elfLoadFailed_) { // P14: latched failure, do not retry per frame
+    if (elfLoadFailed_) { // P14:锁存的失败,不逐帧重试
         return nullptr;
     }
     if (elf == nullptr) {
@@ -389,12 +388,12 @@ const std::shared_ptr<DfxElf> DfxMap::GetElf(pid_t pid)
             elf = nullptr;
         }
         if (createReturnedNull) {
-            // factory refused (TOCTOU-replaced file): the file does not come
-            // back within this process lifetime, latch the failure.
+            // 工厂拒绝(文件被 TOCTOU 替换):本进程生命周期内文件不会
+            // 回来,锁存该失败。
             elfLoadFailed_ = true;
             return nullptr;
         }
-        // open/parse failures above keep the old per-frame retry behavior.
+        // 上述打开/解析失败维持旧的逐帧重试行为。
         // adlt need update lodeBase
         if (elf != nullptr && elf->IsAdlt()) {
             elf->SetLoadBase(GetAdltLoadBase());
@@ -448,14 +447,13 @@ void DfxMap::FormatMapName(pid_t pid, std::string& mapName)
         return;
     }
 
-    // Prefix every absolute file path (not only sandbox /data/storage paths)
-    // with /proc/<pid>/root so file opens reach the target's mount namespace.
-    // Remote unwinding runs in the caller's namespace, where bare /apex or
-    // /system paths may not exist (observed as ENOENT in DfxElf/ElfFactory
-    // and DfxJitDebug::FindJitDescriptor); /proc/<pid>/root always resolves to
-    // the target's view and is reachable once the caller ptrace-attaches.
-    // Skip empty/pseudo entries ([vdso]/[shmm]/[anon:...]/[heap]/[stack], which
-    // start with '['), bare driver names (no '/'), and already-formatted names.
+    // 所有绝对文件路径(不只沙箱 /data/storage 路径)都拼上
+    // /proc/<pid>/root 前缀,让文件打开到达目标的挂载命名空间。远程回溯
+    // 运行在调用方命名空间里,裸的 /apex、/system 路径可能不存在(在
+    // DfxElf/ElfFactory 与 DfxJitDebug::FindJitDescriptor 中实测报 ENOENT);
+    // /proc/<pid>/root 始终解析到目标视角,调用方 ptrace attach 后即可
+    // 访问。跳过空名/伪表项([vdso]/[shmm]/[anon:...]/[heap]/[stack],
+    // 以 '[' 开头)、裸驱动名(不含 '/')、以及已拼过前缀的名字。
     if (mapName.empty() || mapName[0] != '/' || StartsWith(mapName, "/proc/")) {
         return;
     }
@@ -464,10 +462,10 @@ void DfxMap::FormatMapName(pid_t pid, std::string& mapName)
 
 std::string DfxMap::UnFormatMapName(const std::string& mapName)
 {
-    // Drop the '/proc/<pid>/root' prefix added by FormatMapName so the real
-    // target-namespace path is used for display/matching. Apply to every
-    // prefixed path, not only /data/storage (FormatMapName now prefixes all
-    // absolute file paths). Mirrors IsFileBackedMapName's stripping.
+    // 剥掉 FormatMapName 拼上的 '/proc/<pid>/root' 前缀,显示/匹配用
+    // 目标命名空间的真实路径。对所有带前缀的路径生效,不只 /data/storage
+    // (FormatMapName 现在给所有绝对文件路径都拼前缀)。与
+    // IsFileBackedMapName 的剥离逻辑互为镜像。
     if (StartsWith(mapName, "/proc/")) {
         auto rootPos = mapName.find("/root");
         if (rootPos != std::string::npos) {

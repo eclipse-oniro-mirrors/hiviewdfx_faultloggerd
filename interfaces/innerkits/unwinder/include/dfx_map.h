@@ -77,9 +77,8 @@ public:
     std::string perms = ""; // 5:rwxp
     std::string name = "";
     std::shared_ptr<DfxElf> elf = nullptr;
-    // P14: latched when elf creation was attempted and produced an invalid
-    // elf (TOCTOU-replaced or unreadable file); stops per-frame re-open +
-    // re-log storms. Reset never needed within a process lifetime.
+    // P14:尝试创建 elf 且得到无效结果(文件被 TOCTOU 替换或不可读)后置位
+    // 锁存,阻止每帧重新打开文件+刷日志风暴。进程生命周期内无需复位。
     bool elfLoadFailed_ = false;
     std::shared_ptr<DfxHap> hap = nullptr;
     std::shared_ptr<DfxMap> prevMap = nullptr;

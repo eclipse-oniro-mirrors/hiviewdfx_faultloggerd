@@ -67,21 +67,18 @@ public:
     std::string GetSpecialRegsNameByIndex(int index) const;
     std::string PrintSpecialRegs() const;
 
-    // dex_pc pseudo-register (AOSP16 libunwindstack style). Set by DWARF
-    // expression evaluation when a register's CFI uses the DEX1 magic marker.
-    // The unwinder reads it at the start of each step to inject a virtual
-    // DEX frame representing the interpreted Java method's current PC.
+    // dex_pc 伪寄存器(AOSP16 libunwindstack 风格)。当某寄存器的 CFI 规则
+    // 使用 DEX1 魔数标记时,由 DWARF 表达式求值写入。回溯器在每步开始时
+    // 读取它,注入代表解释执行 Java 方法当前 PC 的虚拟 DEX 帧。
     uintptr_t DexPc() const { return dex_pc_; }
     void SetDexPc(uintptr_t pc) { dex_pc_ = pc; }
-    // dexPcSeen tracks whether the DEX1 magic marker fired during the current
-    // DWARF Apply, independently of the evaluated dex_pc value. ART's CFI for
-    // nterp_helper is the only emitter of the DEX1 magic, so the flag alone is
-    // proof of an nterp frame even when the dex_pc value is 0/unmapped (e.g.
-    // the live x22 register was clobbered to 0 by intermediate compiled/JNI
-    // frames before the thread reached a syscall). StepNterp uses this flag to
-    // decide whether to run the callee-saves frame recovery; using DexPc()!=0
-    // instead would miss nterp frames whose dex_pc evaluated to 0 and stop the
-    // unwind at nterp_helper.
+    // dexPcSeen 只记录本次 DWARF Apply 期间 DEX1 魔数是否命中,与求值出的
+    // dex_pc 数值无关。ART 仅为 nterp_helper 的 CFI 发出 DEX1 魔数,所以仅凭
+    // 该标志即可证明这是 nterp 帧——即使 dex_pc 求值为 0/未映射(例如线程
+    // 到达系统调用前,存活的 x22 寄存器已被中间的编译帧/JNI 帧改写为 0)。
+    // StepNterp 依据该标志决定是否执行被调用者保存帧的恢复;若改用
+    // DexPc()!=0 判断,会漏掉 dex_pc 求值为 0 的 nterp 帧,使回溯止步于
+    // nterp_helper。
     bool DexPcSeen() const { return dexPcSeen_; }
     void SetDexPcSeen(bool seen) { dexPcSeen_ = seen; }
     void ClearDexPc()

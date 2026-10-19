@@ -48,28 +48,26 @@ protected:
 private:
     bool LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei,
         const FrameDescEntry** cachedFde);
-    // sorted fde index (by pcEnd) to replace per-step O(N) scan, following
-    // libunwindstack DwarfSection binary search table design. a small LRU of
-    // per-section indexes avoids rebuilding when stack walks alternate modules.
+    // 按 pcEnd 排序的 fde 索引,取代每步 O(N) 线性扫描(对齐 libunwindstack
+    // DwarfSection 二分查找表设计)。按 section 维护一个小型 LRU 索引缓存,
+    // 栈回溯在多个模块间交替时不必反复重建索引。
     struct FdeIndexEntry {
         uintptr_t pcStart;
         uintptr_t pcEnd;
         uintptr_t fdeAddr;
-        // points into fdeEntries_ (unordered_map node addresses are
-        // stable; indexed entries are never erased because a cached
-        // ParseFde always hits and cannot reach the erase-on-fail path)
+        // 指向 fdeEntries_ 中的表项(unordered_map 节点地址稳定;被索引的
+        // 表项永不删除——命中缓存的 ParseFde 直接返回,走不到失败删除路径)
         const FrameDescEntry* entry;
     };
     struct SectionIndex {
         uintptr_t tableData;
-        // F19: .debug_frame sections key tableData by file offset (shdr.offset),
-        // which can be identical across different DSOs (miniDebugInfo buffers
-        // share similar layouts); mix in the backing mmap identity so such
-        // sections cannot false-hit each other's index.
+        // F19: .debug_frame 的 tableData 是文件偏移(shdr.offset),不同 DSO
+        // 可能取到同值(miniDebugInfo 缓冲布局高度相似);混入底层 mmap 的
+        // 身份标识,避免不同 section 的索引互相误命中。
         uintptr_t mmapId;
         std::vector<FdeIndexEntry> entries;
     };
-    std::list<SectionIndex> fdeIndexCache_; // MRU at front
+    std::list<SectionIndex> fdeIndexCache_; // 头部为最近使用(MRU)
     const std::vector<FdeIndexEntry>* BuildFdeIndex(const UnwindTableInfo& uti);
     bool GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo);
     void ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeInfo, bool& isCieEntry);

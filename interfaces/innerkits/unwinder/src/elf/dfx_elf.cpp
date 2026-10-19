@@ -664,8 +664,8 @@ int DfxElf::FindUnwindTableInfo(uintptr_t pc, std::shared_ptr<DfxMap> map, struc
                 hdr = &synthHdr;
             }
         } else if (GetSectionInfo(shdr, DEBUG_FRAME) && GetMmapPtr() != nullptr) {
-            // Use the .debug_frame section of the main ELF (ART/ets_runtime
-            // JIT ELFs carry .debug_frame but no .eh_frame/.eh_frame_hdr).
+            // 用主 ELF 的 .debug_frame 节(ART/ets_runtime 的 JIT ELF 带
+            // .debug_frame 但没有 .eh_frame/.eh_frame_hdr)。
             DFXLOGU("[%{public}d]: Elf(%{public}s) using .debug_frame section, " \
                 "addr: 0x%{public}" PRIx64 ", offset: 0x%{public}" PRIx64 ", size: 0x%{public}" PRIx64 "", __LINE__,
                 map->name.c_str(), shdr.addr, shdr.offset, shdr.size);
@@ -905,6 +905,7 @@ bool DfxElf::IsValidElf(const void* ptr, size_t size)
     return true;
 }
 
+// 从 OAT 头解析 executable_offset(可执行代码段起始 vaddr),非 OAT 返回 0。
 uintptr_t DfxElf::GetOatExecutableOffset(std::shared_ptr<DfxMap> map, std::shared_ptr<DfxMmap> mmap)
 {
     if (map == nullptr || mmap == nullptr) {
@@ -915,23 +916,22 @@ uintptr_t DfxElf::GetOatExecutableOffset(std::shared_ptr<DfxMap> map, std::share
         return name.size() >= suffix.size() &&
             name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
     };
-    // App OAT: /data/app/.../oat/arm64/base.odex; boot OATs:
-    // /system/framework/oat/arm64/boot.oat. Match by suffix; the magic
-    // check below rejects non-OAT files.
+    // 应用 OAT:/data/app/.../oat/arm64/base.odex;boot OAT:
+    // /system/framework/oat/arm64/boot.oat。按后缀匹配;下面的魔数检查
+    // 会拒绝非 OAT 文件。
     if (!endsWith(".odex") && !endsWith(".oat")) {
         return 0;
     }
     constexpr size_t OAT_MAGIC_SIZE = 4;
-    // kOatMagic = { 'o', 'a', 't', '\n' }, read little-endian.
+    // kOatMagic = { 'o', 'a', 't', '\n' },按小端读。
     constexpr uint32_t OAT_MAGIC = 0x0a74616f;
-    // The caller (DwarfEntryParser) subtracts the result from a vaddr-based
-    // pc (pc - loadBase), so return the vaddr of the executable code start
-    // within the image. Two OAT container shapes (art OatFile::Open):
-    //  - flat OAT (oatdump output): OatHeader at file offset 0, vaddr 0;
-    //  - ELF-wrapped OAT (app base.odex / boot.oat since Android 8): file
-    //    offset 0 holds the ELF magic, the OatHeader sits at the start of
-    //    the .oatdata section.
-    // DfxMmap::Read addresses the mapping by offset.
+    // 调用方(DwarfEntryParser)会把本结果从基于 vaddr 的 pc 里减去
+    // (pc - loadBase),所以这里返回映像内可执行代码起始处的 vaddr。
+    // OAT 容器有两种形态(art OatFile::Open):
+    //  - 平铺 OAT(oatdump 产物):OatHeader 在文件偏移 0,vaddr 0;
+    //  - ELF 包裹的 OAT(Android 8 起的应用 base.odex / boot.oat):
+    //    文件偏移 0 是 ELF 魔数,OatHeader 位于 .oatdata 节起始处。
+    // DfxMmap::Read 按偏移访问映射。
     size_t oatHdrFileOff = 0;
     uintptr_t oatHdrVaddr = 0;
     uint32_t magic = 0;
@@ -951,23 +951,24 @@ uintptr_t DfxElf::GetOatExecutableOffset(std::shared_ptr<DfxMap> map, std::share
             return 0;
         }
     }
-    // executable_offset_'s position in OatHeader (art/runtime/oat.h,
-    // PACKED(4)) depends on the OAT version (ASCII decimal at offset 4):
-    //   >= "225" (android-13+): ... dex_file_count@20, oat_dex_files_offset@24,
+    // executable_offset_ 在 OatHeader 中的位置(art/runtime/oat.h,
+    // PACKED(4))随 OAT 版本(偏移 4 处的 ASCII 十进制)而变:
+    //   >= "225"(android-13+):... dex_file_count@20, oat_dex_files_offset@24,
     //                           bcp_bss_info_offset@28, executable_offset@32;
-    //   >= "195" (android-12):  no bcp_bss_info_offset_, executable_offset@28;
-    //   older:                   no oat_dex_files_offset_ either, executable_offset@24.
+    //   >= "195"(android-12): 无 bcp_bss_info_offset_,executable_offset@28;
+    //   更老版本:              连 oat_dex_files_offset_ 也没有,
+    //                           executable_offset@24。
     uint32_t execFieldOff = 24;
     uint8_t version[OAT_MAGIC_SIZE] = {0};
-    readAddr = oatHdrFileOff + 4; // 4: version_ follows magic_
+    readAddr = oatHdrFileOff + 4; // 4: version_ 紧跟 magic_
     if (mmap->Read(readAddr, version, sizeof(version)) &&
         version[0] >= '0' && version[0] <= '9' &&
         version[1] >= '0' && version[1] <= '9' &&
         version[2] >= '0' && version[2] <= '9') {
-        uint32_t ver = (version[0] - '0') * 100 + (version[1] - '0') * 10 + (version[2] - '0'); // 100: hundreds
-        if (ver >= 225) { // 225: android-13 kOatVersion
+        uint32_t ver = (version[0] - '0') * 100 + (version[1] - '0') * 10 + (version[2] - '0'); // 100: 百位
+        if (ver >= 225) { // 225: android-13 的 kOatVersion
             execFieldOff = 32;
-        } else if (ver >= 195) { // 195: android-12 kOatVersion
+        } else if (ver >= 195) { // 195: android-12 的 kOatVersion
             execFieldOff = 28;
         }
     }
@@ -977,7 +978,7 @@ uintptr_t DfxElf::GetOatExecutableOffset(std::shared_ptr<DfxMap> map, std::share
         return 0;
     }
     if (executableOffset == 0 || executableOffset >= mmap->Size()) {
-        return 0; // sanity: the code start must lie inside the file
+        return 0; // 合理性检查:代码起点必须落在文件内
     }
     DFXLOGU("GetOatExecutableOffset: map=%{public}s, oatHdr@0x%{public}x, execFieldOff=%{public}u, "
         "executableOffset=0x%{public}x", name.c_str(), (uint32_t)oatHdrFileOff, execFieldOff, executableOffset);

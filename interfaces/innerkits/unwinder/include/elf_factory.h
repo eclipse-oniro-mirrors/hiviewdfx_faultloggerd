@@ -39,8 +39,8 @@ public:
     std::shared_ptr<DfxElf> Create() override;
 private:
     std::string filePath_;
-    // P14: identity of the file the target process actually mapped
-    // (from /proc/pid/maps); used to detect rename-replacement (TOCTOU).
+    // P14:目标进程实际映射的文件身份(取自 /proc/pid/maps),
+    // 用于检测"先改名再替换"导致的 TOCTOU。
     uint64_t devMajor_ = 0;
     uint64_t devMinor_ = 0;
     ino_t inode_ = 0;

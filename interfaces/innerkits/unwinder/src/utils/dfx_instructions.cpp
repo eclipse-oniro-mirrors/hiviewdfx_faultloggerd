@@ -69,11 +69,10 @@ bool DfxInstructions::Flush(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, ui
         case REG_LOC_VAL_EXPRESSION: {
             DwarfOp<uintptr_t> dwarfOp(memory);
             val = dwarfOp.Eval(regs, cfa, loc.val);
-            // AOSP16: when the DWARF expression starts with the DEX1 magic
-            // (DW_OP_const4u 'D' 'E' 'X' '1' DW_OP_drop), the evaluated value
-            // is the interpreted Java method's dex_pc. Store it in the
-            // pseudo-register and tell the caller not to overwrite the
-            // normal register slot.
+            // AOSP16:DWARF 表达式以 DEX1 魔数开头(DW_OP_const4u
+            // 'D' 'E' 'X' '1' DW_OP_drop)时,求值结果是解释执行 Java
+            // 方法的 dex_pc。存入伪寄存器,并告知调用方不要覆盖普通
+            // 寄存器槽位。
             if (dwarfOp.DexPcSet()) {
                 is_dex_pc = true;
                 DFXLOGU("Flush: DEX1 dex_pc detected, val=0x%{public}" PRIx64 "", (uint64_t)val);
@@ -128,10 +127,10 @@ bool DfxInstructions::Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, Re
     }
 
     for (size_t i = 0; i < rsState.locs.size(); i++) {
-        // REG_LOC_UNUSED: same value as the previous frame (DW_CFA_same_value).
-        // REG_LOC_UNDEFINED: value is not recoverable in this frame
-        // (DW_CFA_undefined, e.g. ART's .oat CFI frequently marks x22/dex_pc
-        // undefined in JNI trampolines). Keep the live register value for both.
+        // REG_LOC_UNUSED:与上一帧同值(DW_CFA_same_value)。
+        // REG_LOC_UNDEFINED:本帧恢复不出该值(DW_CFA_undefined,如 ART
+        // 的 .oat CFI 常在 JNI trampoline 里把 x22/dex_pc 标为 undefined)。
+        // 两种情况都保留寄存器现场值。
         RegLocEnum locType = rsState.locs[i].type;
         if (locType != REG_LOC_UNUSED && locType != REG_LOC_UNDEFINED) {
             size_t reg = DfxRegsQut::GetQutRegs()[i];
@@ -139,12 +138,12 @@ bool DfxInstructions::Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, Re
             uintptr_t val = 0;
             if (Flush(regs, memory, cfa, rsState.locs[i], val, isDexPc)) {
                 if (isDexPc) {
-                    // CFI marked this value as dex_pc -> store in pseudo-register.
-                    // The DEX1 magic only fires for ART's nterp_helper CFI, so also
-                    // raise the seen flag independently of the value: when the live
-                    // x22 (read by the val_expression) was clobbered to 0, the value
-                    // is 0 but StepNterp still needs to know this is an nterp frame
-                    // to run the callee-saves recovery and read the saved x22.
+                    // CFI 把该值标记为 dex_pc -> 存入伪寄存器。DEX1 魔数
+                    // 只有 ART 为 nterp_helper 的 CFI 才会命中,所以同时无
+                    // 视数值置起 seen 标志:当活 x22(val_expression 读的
+                    // 那个)被改写为 0 时,值为 0,但 StepNterp 仍需要知道
+                    // 这是 nterp 帧,才能执行被调用者保存帧恢复、读保存的
+                    // x22。
                     regs.SetDexPc(val);
                     regs.SetDexPcSeen(true);
                     DFXLOGU("Apply: set dex_pc=0x%{public}" PRIx64 " (from reg slot %{public}zu)", (uint64_t)val, i);
@@ -169,15 +168,12 @@ bool DfxInstructions::Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, Re
         DFXLOGU("returnAddressRegister: %{public}d", (int)rsState.returnAddressRegister);
         regs.SetPc(regs[rsState.returnAddressRegister]);
         if (regs.GetPc() == 0) {
-            // No caller was recovered: the RA slot's CFA-relative read failed and
-            // the live RA register holds 0. Returning true here would mark the
-            // step successful with pc=0, which skips the LR/nterp/JIT/fp
-            // fallbacks in UpdateRegsState and then dies at CheckFrameValid.
-            // Fail instead so the fallback chain (first-frame LR fallback etc.)
-            // can take over. This restores the behaviour the removed
-            // SP-readability check used to provide, without re-introducing it
-            // (the nterp CFA may legitimately compute an unreadable CFA while
-            // its return address is recovered fine).
+            // 没有恢复出调用者:RA 槽的 CFA 相对读失败,活 RA 寄存器为 0。
+            // 此处返回 true 会把 pc=0 的步进标记为成功,跳过 UpdateRegsState
+            // 里的 LR/nterp/JIT/fp 兜底,随后死在 CheckFrameValid。改为失败,
+            // 让兜底链(首帧 LR 兜底等)接管。这恢复了被删掉的 SP 可读性
+            // 检查曾提供的行为,又不必重新引入它(nterp 的 CFA 可能合法地
+            // 算出不可读的 CFA,而返回地址恢复得很好)。
             errCode = UNW_ERROR_INVALID_MEMORY;
             DFXLOGU("Apply: recovered return address is 0, treat as step failure");
             return false;

@@ -84,7 +84,7 @@ struct DfxFrame {
     uint64_t fp {0};
     /** map offset */
     uint64_t mapOffset {0};
-    /** embedded elf start offset in the container file (apk/hap), 0 for standalone so */
+    /** 内嵌 elf 在容器文件(apk/hap)内的起始偏移,独立 so 为 0 */
     uint64_t elfOffset {0};
     /** function byte offset */
     uint64_t funcOffset {0};

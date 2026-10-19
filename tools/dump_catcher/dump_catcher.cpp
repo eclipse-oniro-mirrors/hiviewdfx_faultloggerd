@@ -93,6 +93,8 @@ DumpCatcher &DumpCatcher::GetInstance()
 
 void DumpCatcher::Dump(const DumpOptions& dumpOpt) const
 {
+    // 容器内进程走专用转储路径(见 DumpContainerStack):其模块路径在
+    // 宿主命名空间不可直达,常规 DfxDumpCatcher 路径打不开容器内的 so。
     if (IsContainerProcess(dumpOpt.pid)) {
         DumpContainerStack(dumpOpt);
         return;
@@ -174,6 +176,10 @@ std::string DumpCatcher::GetBundleName(int32_t pid) const
     return GetBundleNameByUid(uid);
 }
 
+// 判定目标是否容器内进程:读 /proc/<pid>/status 的 NSpid 行,列出两个及
+// 以上 pid 说明目标处于独立的 pid namespace(嵌套);此时第二列是容器
+// 内视角的 pid,不为 1(即不是该 namespace 的 init 自身)则按容器进程
+// 处理。非容器进程 NSpid 只有一列,返回 false。
 bool DumpCatcher::IsContainerProcess(int32_t pid) const
 {
     if (pid <= 0) {
@@ -225,6 +231,10 @@ bool DumpCatcher::IsContainerProcess(int32_t pid) const
     return pids[CONTAINER_PID_INDEX] != "1";
 }
 
+// 容器进程栈转储:改由 Unwinder 直接回溯,DfxMap::FormatMapName 会把
+// map 名拼成 /proc/<pid>/root 前缀路径,宿主侧即可打开容器内的模块;
+// 开启 miniDebugInfo 以解析容器内应用的 so 符号。逐 tid ptrace attach
+// 后回溯、完毕即 detach;未指定 tid 时遍历目标全部线程。
 void DumpCatcher::DumpContainerStack(const DumpOptions& dumpOpt) const
 {
     ElapsedTime counter;
