@@ -95,10 +95,25 @@ public:
     void SetPid(pid_t pid);
     void SetArch(ArchType arch);
 
+    // 判定 pc 是否属于某个 JIT 代码块,命中返回该块的内存 ELF 与
+    // loadBias。流程:查进程级 hit/miss 缓存(按 pid 分桶,miss 缓存在
+    // 表项数变化时整体失效)→ 未命中先确保描述符已定位
+    // (EnsureJitDescriptorLocked)→ 遍历已缓存表项(IsValidPc 比对 +
+    // seqlock 复核)→ 仍未中则增量重读链表(ReadAllEntries)再比对。
+    // TryJitStep(JIT 帧步进)与 TryJitSymbolLookup(JIT 符号化)的
+    // 共同入口。
     bool FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias);
+    // FindJitElf 的符号化包装:命中时额外给出 startPc/endPc/loadBias。
+    // 带运行时区间的 JIT ELF 符号值是绝对运行时地址,故 startPc 置 0,
+    // 使调用方 relPc = pc - startPc 等于绝对 pc,与符号值同量纲。
     bool GetJitSymbolInfo(uint64_t pc, JitSymbolInfo& info);
+    // 枚举所有覆盖 pc 的 JIT ELF:先扫缓存表项(seqlock 复核),再增量
+    // 重读链表扫新表项;每命中一个回调一次,回调返回 true 即停止。
+    // 与 FindJitElf 的区别:不写 hit/miss 缓存,适合一次性枚举场景。
     bool ForEachJitElf(uint64_t pc, std::function<bool(const JitSymbolInfo&)> callback);
+    // 描述符是否已定位(__jit_debug_descriptor 地址非 0)。
     bool HasJitDebugInfo() const { return descriptorAddr_ != 0; }
+    // 清空描述符地址、表项缓存与失败缓存(Unwinder 换目标 pid 时调用)。
     void Clear();
 
 private:

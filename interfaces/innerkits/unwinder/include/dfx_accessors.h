@@ -88,9 +88,14 @@ private:
         READ_METHOD_VM_READV,
         READ_METHOD_PTRACE_PEEK,
     };
+    // process_vm_readv 读取路径:直接映射式 8 槽页缓存,整页预取一次
+    // 系统调用;跨页尾的非对齐访问与页尾未映射的重试退化为单字直读。
     bool ReadByVmReadv(uintptr_t addr, uintptr_t *val, pid_t pid);
+    // ptrace PEEKDATA 读取路径:32 位宿主上分两次 4 字节拼出 64 位值。
     bool ReadByPtrace(uintptr_t addr, uintptr_t *val, pid_t pid);
 
+    // 页缓存槽:页基址 + 有效长度 + 整页数据;槽位按页号直接映射
+    // ((页基址/页大小) % 槽数)定位。
     struct PageSlot {
         uintptr_t base = 0;
         size_t validLen = 0;

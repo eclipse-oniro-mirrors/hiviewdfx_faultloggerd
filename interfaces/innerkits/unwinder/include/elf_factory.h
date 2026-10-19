@@ -60,12 +60,19 @@ private:
 
 class CompressHapElfFactory : public ElfFactory {
 public:
+    // curOffset/curSize:当前映射自身的文件偏移与大小——apk 布局里内嵌
+    // .so 的 ELF 头通常就在当前偏移处,先按它加载;prevMap 是 hap 布局
+    // 的回退入口(ELF 头在前一只读映射)。两种布局详见 .cpp 的 Create()。
     explicit CompressHapElfFactory(std::string filePath, std::shared_ptr<DfxMap> prevMap,
                                    uint64_t curOffset = 0, uint64_t curSize = 0)
         : filePath_(std::move(filePath)), prevMap_(prevMap), curOffset_(curOffset), curSize_(curSize) {}
     ~CompressHapElfFactory() override = default;
     std::shared_ptr<DfxElf> Create() override;
 private:
+    // 从包文件的 (offset, size) 处加载内嵌 ELF:先按头大小 mmap 验证
+    // ELF 魔数,由 e_shoff + 节头表大小推出 ELF 总长并做溢出/上限/文件
+    // 边界校验,再整段 mmap、构造 DfxElf 且 baseOffset=offset。失败
+    // 返回 nullptr,调用方换下一个候选偏移重试。
     std::shared_ptr<DfxElf> LoadEmbeddedElf(int fd, uint64_t offset, uint64_t size);
     const std::string filePath_;
     std::shared_ptr<DfxMap> prevMap_;

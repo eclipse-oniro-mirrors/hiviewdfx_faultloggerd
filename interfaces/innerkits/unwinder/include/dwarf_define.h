@@ -233,7 +233,7 @@ struct FrameDescEntry {
     uintptr_t instructionsOff = 0;
     uintptr_t instructionsEnd = 0;
     uintptr_t cieAddr = 0;
-    uintptr_t ciePtrValue = 0;
+    uintptr_t ciePtrValue = 0; // FDE 头中 CIE 指针的原始值:eh_frame 为相对回退量,debug_frame 为 section 内绝对偏移
     CommonInfoEntry cie;
 };
 

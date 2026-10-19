@@ -56,6 +56,13 @@ public:
     uint64_t GetEndPc();
     uint64_t GetStartVaddr();
     uint64_t GetEndVaddr();
+    // 判定运行时 pc 是否落在本 ELF 的代码区间内。与 /proc 映射无关,按
+    // ELF 自身内容判定,三级策略:①SetRuntimeRange 设过运行时区间
+    // (JIT ELF 专用)则直接比对;②用 PT_LOAD 段 [p_vaddr + loadBase,
+    // + p_memsz) 匹配,任一段覆盖即真(对齐 libunwindstack
+    // ElfInterface::IsValidPc);③无程序头时退回节区 vaddr 范围。
+    // 主要调用方 DfxJitDebug:遍历 JIT 表项时判断 pc 属于哪个 JIT ELF——
+    // JIT 代码在匿名映射里,DfxMaps 查不到,只能按 ELF 内容自证归属。
     bool IsValidPc(uint64_t pc);
     // JIT ELF 专用:记录 .text/符号的绝对运行时地址区间(ART JIT ELF 的
     // sh_addr/st_value 本就是运行时地址)。设置后 IsValidPc 与
@@ -87,7 +94,31 @@ public:
     const std::string& GetAdltStrtab() const;
     std::string GetAdltOriginSoNameByRelPc(uint64_t relPc) const;
     bool FindFuncSymbolByName(std::string funcName, ElfSymbol& elfSymbol);
+    // 按名字查找全局变量符号:遍历已解析的符号表(.symtab 与 .dynsym),
+    // 跳过未定义/零值表项,在关联 .strtab 中比对名字,命中返回 st_value
+    // (节内 vaddr)等。当前唯一调用方是 DfxJitDebug::FindJitDescriptor——
+    // 在 libart.so/libartd.so 里定位 __jit_debug_descriptor(JIT 代码
+    // 注册表头),st_value + 映射基址即其运行时地址。
+    // 为何不复用既有查找:FindFuncSymbolByName 遍历的是解析期收集的
+    // funcSymbols_ 集合,该集合只收 STT_FUNC/STT_GNU_IFUNC 函数符号,
+    // __jit_debug_descriptor 这类 STT_OBJECT 数据符号不在其中,且其
+    // 比对前还做一层 C++ Demangle;GetFuncSymbolByAddr 则是按地址反查,
+    // 方向不对。按名查变量只能直扫原始符号表,故新增此路径。
     bool FindGlobalVariableByName(const std::string& name, ElfSymbol& elfSymbol);
+    // 从 OAT 头解析 executable_offset,返回可执行代码段起始处的 vaddr;
+    // 非 OAT 文件(不以后缀 .odex/.oat 结尾,或 'oat\n' 魔数不符)返回 0。
+    // 用途:speed-profile 编译的 odex 主 ELF 无 .eh_frame,其 miniDebugInfo
+    // (.gnu_debugdata 解压)的 .debug_frame 中 FDE 区间相对"代码段起点"
+    // (= OatHeader + executable_offset)起算;DwarfEntryParser 须以
+    // checkPc = pc - segbase - 本返回值 换算后才能与 FDE 区间比对,
+    // 不减则 odex 代码等于无回溯信息。
+    // 实现要点:①OatHeader 定位兼容两种容器形态——平铺 OAT(文件偏移 0
+    // 即魔数,vaddr 0)与 ELF 包裹(应用 base.odex / boot.oat,OatHeader
+    // 位于 .oatdata 节起始,取 shdr.offset/shdr.addr);②字段位置随 OAT
+    // 版本变化(读偏移 +4 的 ASCII 版本号):≥225(android-13+)在 +32,
+    // ≥195(android-12)在 +28,更老在 +24;③返回 oatHdrVaddr +
+    // executableOffset,保持 vaddr 量纲与被减的 pc 一致;值非 0 且小于
+    // 文件大小才算有效。
     uintptr_t GetOatExecutableOffset(std::shared_ptr<DfxMap> map, std::shared_ptr<DfxMmap> mmap);
 
 protected:

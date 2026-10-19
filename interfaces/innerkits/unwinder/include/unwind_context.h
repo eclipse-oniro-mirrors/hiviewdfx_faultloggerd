@@ -38,13 +38,22 @@ struct UnwindTableInfo {
     uintptr_t gp = 0; /* global-pointer in effect for this entry */
     int format = -1;
     bool isLinear = false;
+    // 回溯表来自 .debug_frame(而非 .eh_frame/.eh_frame_hdr):entry
+    // 遍历与 CIE 指针按 debug_frame 约定解析
+    // (见 DwarfEntryParser::SetDebugFrameMode)。
     bool isDebugFrame = false;
     uintptr_t namePtr = 0;
     uintptr_t segbase = 0;
     uintptr_t tableLen = 0;
     uintptr_t tableData = 0;
+    // .debug_frame 所在的 mmap(主 ELF 或 miniDebugInfo 解压缓冲);
+    // Step 期间把解析器的 memory_ 临时切到它,按文件偏移直读 entry。
     std::shared_ptr<DfxMmap> debugFrameMmap = nullptr;
+    // .debug_frame 在该 mmap 中的结束偏移,线性扫描的边界。
     uintptr_t debugFrameEnd = 0;
+    // odex 场景:OAT executable_offset 的 vaddr(见
+    // DfxElf::GetOatExecutableOffset)。debug_frame 的 FDE 区间相对
+    // 代码段起点起算,比对前须从 pc 里减掉本值。
     uintptr_t oatExecutableOffset = 0;
 };
 

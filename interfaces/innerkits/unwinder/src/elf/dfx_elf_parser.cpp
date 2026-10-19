@@ -819,6 +819,13 @@ bool ElfParser64::GetFuncSymbolByAddr(uint64_t addr, ElfSymbol& elfSymbol)
     return ParseFuncSymbolByAddr<Elf64_Sym>(addr, elfSymbol);
 }
 
+// 按名字线性遍历符号表;ElfParser64/32 各自实例化,由
+// DfxElf::FindGlobalVariableByName 先 64 后 32 依次尝试。
+// 新增动机:既有按名查找 FindFuncSymbolByName 遍历的 funcSymbols_ 集合
+// 在收集时只收 STT_FUNC/STT_GNU_IFUNC 函数符号,STT_OBJECT 数据符号
+// (如 libart 的 __jit_debug_descriptor)不在其中;GetFuncSymbolByAddr
+// 又是按地址反查,方向不对。按名查全局变量只能直扫原始符号表,
+// 故新增本模板(完整对比见 DfxElf::FindGlobalVariableByName)。
 template <typename SymType>
 bool ElfParser::FindSymbolByName(const std::string& name, ElfSymbol& elfSymbol)
 {

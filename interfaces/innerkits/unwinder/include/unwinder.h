@@ -53,6 +53,7 @@ public:
 
     void SetRegs(std::shared_ptr<DfxRegs> regs);
     void SetMaps(std::shared_ptr<DfxMaps> maps);
+    // 重设目标 pid;换进程时连带清空 JIT 描述符/表项缓存(见 Impl::SetPid)。
     void SetPid(pid_t pid);
     // 可选的兜底栈扫描:当某帧无回溯表、LR 已失效或无操作、fp 链也不可用时,
     // 从 sp 向上扫描栈,寻找貌似保存的返回地址(落在可执行映射、地址对齐)。

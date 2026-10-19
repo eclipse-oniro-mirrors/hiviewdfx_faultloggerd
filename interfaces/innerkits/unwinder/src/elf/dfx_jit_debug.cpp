@@ -167,6 +167,12 @@ bool DfxJitDebug::FindJitDescriptorLocal()
     return ReadDescriptor();
 }
 
+// 定位 __jit_debug_descriptor 并读出描述符。本进程先走 dlsym;远程则
+// 扫描 maps 找 libart.so/libartd.so 的 ELF 头映射(只读、offset 0 行),
+// 用 FindGlobalVariableByName 按名查符号,vaddr + 映射基址得运行时
+// 地址,再按地址反查所属 map 后经 ReadDescriptor 验证版本与魔数。
+// 三种结果:FOUND / RETRY_LATER(maps 未设,可重试)/ NOT_PRESENT
+// (搜遍无果,对本 pid 终局)。
 DfxJitDebug::JitDescriptorStatus DfxJitDebug::FindJitDescriptor()
 {
     if (pid_ <= 0 || pid_ == getpid()) {
@@ -653,6 +659,9 @@ bool DfxJitDebug::GetJitSymbolInfo(uint64_t pc, JitSymbolInfo& info)
     return true;
 }
 
+// 枚举覆盖 pc 的全部 JIT ELF(接口说明见头文件):先扫缓存表项
+// (IsValidPc 命中后 seqlock 复核),再增量重读链表(ReadAllEntries)
+// 扫新表项;每命中一个构造 JitSymbolInfo 回调一次。
 bool DfxJitDebug::ForEachJitElf(uint64_t pc, std::function<bool(const JitSymbolInfo&)> callback)
 {
     if (!callback) {

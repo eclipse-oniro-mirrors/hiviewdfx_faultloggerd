@@ -60,6 +60,19 @@ public:
     virtual bool GetSectionInfo(ShdrInfo& shdr, const std::string& secName);
     virtual bool GetSectionData(unsigned char *buf, uint64_t size, std::string secName);
     virtual bool GetFuncSymbolByAddr(uint64_t addr, ElfSymbol& elfSymbol) = 0;
+    // 按名字在符号表中线性查找符号,命中填充并返回 ElfSymbol
+    // (value=st_value、size=st_size、name/nameStr)。遍历解析期收集的
+    // 全部符号表 section(symShdrs_,.symtab 与 .dynsym 都在):每个
+    // section 先经 shdr.link 取关联字符串表(.strtab/.dynstr),再按
+    // size/entSize 逐项读 SymType;跳过未定义表项(SHN_UNDEF,导入
+    // 符号在本文件内无地址)、st_value==0 及 st_name 越界者,名字用
+    // strnlen 界定后做精确比对,首个命中即返回。新增原因:既有按名查找
+    // (FindFuncSymbolByName)遍历的 funcSymbols_ 集合只收 STT_FUNC/
+    // STT_GNU_IFUNC 函数符号,按名查全局变量(如 libart 的
+    // __jit_debug_descriptor)查不到,只能直扫原始符号表(完整对比见
+    // DfxElf::FindGlobalVariableByName)。不区分符号类型(函数/变量均可
+    // 命中;变量查找入口即 FindGlobalVariableByName)。
+    // 模板按 Elf32_Sym/Elf64_Sym 显式实例化,调用方先 64 后 32 尝试。
     template <typename SymType>
     bool FindSymbolByName(const std::string& name, ElfSymbol& elfSymbol);
     const std::unordered_map<uint64_t, ElfLoadInfo>& GetPtLoads() {return ptLoads_;}
