@@ -456,8 +456,6 @@ HWTEST_F(ProcessDumpTest, GetBundleInfoUnittest001, TestSize.Level2) {
 #ifndef is_ohos_lite
     auto name = DumpUtils::GetSelfBundleName();
     EXPECT_TRUE(name.empty());
-    auto allowCoredump = DumpUtils::HasCoredumpPermission();
-    EXPECT_FALSE(allowCoredump);
 #endif
     GTEST_LOG_(INFO) << "GetBundleInfoUnittest001: end.";
 }

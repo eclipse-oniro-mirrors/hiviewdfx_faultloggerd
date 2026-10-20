@@ -29,7 +29,9 @@
 #ifndef is_ohos_lite
 #include "parameter.h"
 #include "parameters.h"
+#ifndef DFX_UPDATER_PROCESSDUMP
 #include "hitrace/hitracechainc.h"
+#endif
 #endif
 #include "procinfo.h"
 #include "info/fatal_message.h"
@@ -60,7 +62,7 @@ void DumpInfoHeader::Collect(DfxProcess& process, const ProcessDumpRequest& requ
     headerInfo_ += StringPrintf("Pid:%d\nUid:%d\n", process.GetProcessInfo().pid, process.GetProcessInfo().uid);
     CppCrashInfoCollector::Instance().SetPid(process.GetProcessInfo().pid);
     CppCrashInfoCollector::Instance().SetUid(process.GetProcessInfo().uid);
-#ifndef is_ohos_lite
+#if !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     if (request.type == ProcessDumpType::DUMP_TYPE_CPP_CRASH && request.hitraceId.valid == HITRACE_ID_VALID) {
         tempStr = StringPrintf("%" PRIx64 "\n", static_cast<uint64_t>(request.hitraceId.chainId));
         headerInfo_ += "HiTraceId:" + tempStr;
@@ -192,7 +194,9 @@ std::string DumpInfoHeader::GetCrashLogConfigInfo(const ProcessDumpRequest& requ
 {
     constexpr uint32_t extendPcLrMask = 0x1;
     constexpr uint32_t simplifyVmaMask = 0x2;
+#ifndef DFX_UPDATER_PROCESSDUMP
     constexpr uint32_t mergeAppLogMask = 0x4;
+#endif
     CrashLogConfig crashLogConfig;
     std::string crashLogConfigInfo;
     if ((request.crashLogConfig & extendPcLrMask) == extendPcLrMask) {
@@ -214,6 +218,7 @@ std::string DumpInfoHeader::GetCrashLogConfigInfo(const ProcessDumpRequest& requ
         crashLogConfigInfo += "Simplify maps printing:true\n";
         CppCrashInfoCollector::Instance().SetSimplifyVmaPrinting(true);
     }
+#ifndef DFX_UPDATER_PROCESSDUMP
     if ((request.crashLogConfig & mergeAppLogMask) == mergeAppLogMask) {
         crashLogConfig.mergeAppLog = true;
         crashLogConfigInfo += "Merge app log printing:true\n";
@@ -224,6 +229,7 @@ std::string DumpInfoHeader::GetCrashLogConfigInfo(const ProcessDumpRequest& requ
         crashLogConfigInfo += "Enable minidump log:true\n";
         CppCrashInfoCollector::Instance().SetMinidumpLog(true);
     }
+#endif
     if (!crashLogConfigInfo.empty()) {
         crashLogConfigInfo = "Enabled app log configs:\n" + crashLogConfigInfo;
     }

@@ -71,10 +71,10 @@
 #include "proc_util.h"
 #include "reporter.h"
 #include "unwinder_config.h"
-#ifndef is_ohos_lite
+#if !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
 #include "hitrace/hitracechainc.h"
 #endif // !is_ohos_lite
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
 #include "coredump_controller.h"
 #endif
 namespace OHOS {
@@ -129,8 +129,10 @@ void ProcessDumper::Dump()
         if (needMergeLog_ && mergeLogThread_.joinable()) {
             mergeLogThread_.join();
         }
+#ifndef DFX_UPDATER_PROCESSDUMP
         SysEventReporter reporter(request_.type);
         reporter.Report(*process_, request_);
+#endif
     }
 }
 
@@ -141,7 +143,7 @@ DumpErrorCode ProcessDumper::DumpProcess()
     if (dumpRes != DumpErrorCode::DUMP_ESUCCESS) {
         return dumpRes;
     }
-#ifndef is_ohos_lite
+#if !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     if (sizeof(HiTraceIdStruct) == sizeof(DumpHiTraceIdStruct)) {
         HiTraceIdStruct* hitraceIdPtr = reinterpret_cast<HiTraceIdStruct*>(&request_.hitraceId);
         hitraceIdPtr->flags |= HITRACE_FLAG_INCLUDE_ASYNC;
@@ -195,7 +197,7 @@ DumpErrorCode ProcessDumper::DumpPreparation()
     }
     std::future<DumpErrorCode> initTask;
     bool isCoreDump = false;
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     isCoreDump = coredumpManager_ != nullptr;
 #endif
     if (!isCoreDump) {
@@ -206,7 +208,7 @@ DumpErrorCode ProcessDumper::DumpPreparation()
         DFXLOGE("Failed to read vm pid!");
         return DumpErrorCode::DUMP_EREADPID;
     }
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     if (coredumpManager_) {
         coredumpManager_->DumpMemoryForPid(process_->GetVmPid());
         return DumpErrorCode::DUMP_COREDUMP;
@@ -670,6 +672,10 @@ bool ProcessDumper::InitUnwinder(DumpErrorCode &dumpRes)
     bool crash = request_.type != ProcessDumpType::DUMP_TYPE_DUMP_CATCH;
     unwinder_ = std::make_shared<Unwinder>(process_->GetVmPid(), process_->GetVmPid(), crash, dfxMaps_);
     unwinder_->EnableParseNativeSymbol(false);
+#ifdef DFX_UPDATER_PROCESSDUMP
+    unwinder_->IgnoreMixstack(true);
+    unwinder_->EnableJsvmstack(false);
+#endif
     if (unwinder_->GetMaps() == nullptr) {
         ReportCrashException(CrashExceptionCode::CRASH_LOG_EMAPLOS);
         DFXLOGE("Mapinfo of crashed process is not exist!");
@@ -703,7 +709,7 @@ DumpErrorCode ProcessDumper::InitDfxProcess()
         return DumpErrorCode::DUMP_EATTACH;
     }
     DFXLOGI("Init key thread successfully.");
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     if (CoredumpController::IsCoredumpAllowed(request_)) {
         alarm(COREDUMP_TIMEOUT); // reset processdump alarm for coredump timeout
         coredumpManager_ = std::make_unique<CoredumpManager>();
@@ -713,7 +719,7 @@ DumpErrorCode ProcessDumper::InitDfxProcess()
     DumpUtils::NotifyOperateResult(request_, OPE_SUCCESS);
     auto ret =  process_->InitOtherThreads(request_);
     DFXLOGI("Finish create all thread.");
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     if (coredumpManager_) {
         coredumpManager_->TriggerCoredump();
     }
@@ -730,7 +736,7 @@ int ProcessDumper::ReadVmPid()
     DumpUtils::WaitForFork(request_.tid, childPid);
     ptrace(PTRACE_CONT, childPid, NULL, NULL);
     bool isCoredumpSignal = false;
-#if defined(__aarch64__) && !defined(is_ohos_lite)
+#if defined(__aarch64__) && !defined(is_ohos_lite) && !defined(DFX_UPDATER_PROCESSDUMP)
     isCoredumpSignal = CoredumpController::IsCoredumpSignal(request_);
 #endif
     // freeze and coredump detach target processdump after fork child to fork vm process

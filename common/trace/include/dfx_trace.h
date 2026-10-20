@@ -18,7 +18,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
-#ifdef DFX_ENABLE_TRACE
+#if defined(DFX_ENABLE_TRACE) && !defined(DFX_UPDATER_PROCESSDUMP)
 #include "hitrace_meter.h"
 constexpr int TRACE_BUF_LEN = 128;
 void DfxStartTrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
