@@ -50,6 +50,23 @@ namespace HiviewDFX {
 const size_t X86_FP_SP_OFFSET = 16;
 #endif
 
+namespace {
+class StackCheckGuard {
+public:
+    explicit StackCheckGuard(UnwindContext& ctx) : ctx_(ctx), prev_(ctx.stackCheck)
+    {
+        ctx_.stackCheck = true;
+    }
+    ~StackCheckGuard()
+    {
+        ctx_.stackCheck = prev_;
+    }
+private:
+    UnwindContext& ctx_;
+    bool prev_ {false};
+};
+}
+
 class Unwinder::Impl {
 public:
     // for local
@@ -803,6 +820,7 @@ bool Unwinder::Impl::StepV8Frame(StepFrame& frame, const std::shared_ptr<DfxMap>
         ", frameType: "+ std::to_string(static_cast<uint8_t>(frame.frameType));
     ElapsedTime counter(timeLimitCheck, 20); // 20 : limit cost time 20 ms
     JsvmStepParam jsvmParam(&frame.fp, &frame.sp, &frame.pc, &frame.isJsFrame);
+    StackCheckGuard guard(context_);
     if (DfxJsvm::Instance().StepJsvmFrame(memory_.get(), &(Unwinder::AccessMem), &jsvmParam) < 0) {
         DFXLOGE("Failed to step jsvm frame");
         return false;
@@ -899,6 +917,7 @@ int Unwinder::Impl::UnwindArkFrameByFp(StepFrame& frame, const ArkMapRange& arkM
         frame.frameType = FrameType::STATIC_JS_FRAME;
         frameIndex = 0;
     }
+    StackCheckGuard guard(context_);
     if (!StepArkJsFrame(frame, frameIndex)) {
         DFXLOGE("Failed to step ark Js frame, pc: %{private}p", reinterpret_cast<void *>(frame.pc));
         lastErrorData_.SetAddrAndCode(frame.pc, UNW_ERROR_STEP_ARK_FRAME);
@@ -1070,6 +1089,7 @@ bool Unwinder::Impl::UnwindArkFrame(StepFrame& frame, const std::shared_ptr<DfxM
     if (!enableMixstack_ || map == nullptr) {
         return true;
     }
+    StackCheckGuard guard(context_);
     if (map->IsStaticArkExecutable() || frame.frameType == FrameType::STATIC_JS_FRAME) {
         static uint64_t frameIndex = 0;
         if (map->IsStaticArkExecutable()) {
