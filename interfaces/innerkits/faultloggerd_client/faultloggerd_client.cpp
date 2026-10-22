@@ -75,6 +75,10 @@ int32_t RequestFileDescriptor(const struct FaultLoggerdRequest &request)
         case FILE_DELETE_STACKTRACE:
             SendRequestToServer(SERVER_CRASH_SOCKET_NAME, socketRequestData, CRASHDUMP_SOCKET_TIMEOUT, &socketFdData);
             return fd;
+        case ADDR_SANITIZER:
+            SendRequestToServer(SERVER_SOCKET_NAME, socketRequestData, CRASHDUMP_SOCKET_TIMEOUT,
+                &socketFdData, true);
+            return fd;
         default:
             SendRequestToServer(SERVER_SOCKET_NAME, socketRequestData, CRASHDUMP_SOCKET_TIMEOUT, &socketFdData);
             return fd;
