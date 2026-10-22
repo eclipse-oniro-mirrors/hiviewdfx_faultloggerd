@@ -17,6 +17,7 @@
 
 #include <fcntl.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -140,6 +141,8 @@ void DFX_SetBinderCallerPid(pid_t callerPid);
  * @warning Non-thread-safe and non-signal-safe. Call early in program initialization.
  */
 int DfxNotifyWatchdogThreadStart(const char* signalStr);
+
+int DfxNotifySetExitCatchAbort(bool enable, bool isDebuggable);
 
 #ifdef __cplusplus
 }

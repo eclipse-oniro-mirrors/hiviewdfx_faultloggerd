@@ -28,7 +28,9 @@ int32_t DFX_InheritCapabilities(void);
 
 bool DFX_SetDumpableState(void);
 void DFX_RestoreDumpableState(void);
-void SetKernelSnapshot(bool enable);
+
+// Update only the selected flags; return true on success.
+bool SetDieCatch(uint32_t flag, bool enable);
 
 #ifdef __cplusplus
 }

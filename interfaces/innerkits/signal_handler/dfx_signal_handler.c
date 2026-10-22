@@ -532,7 +532,7 @@ static void DFX_InstallSignalHandler(void)
 
     InitSignalHandlerMutex();
 
-    SetKernelSnapshot(true);
+    (void)SetDieCatch(CRASH_SNAPSHOT_FLAG, true);
     InitCallbackItems();
     struct signal_chain_action sigchain = {
         .sca_sigaction = DFX_SigchainHandler,
@@ -718,7 +718,20 @@ int DfxNotifyWatchdogThreadStart(const char* signalStr)
     if (!DFX_SetDumpableState()) {
         return -1;
     }
-    SetKernelSnapshot(true);
+    (void)SetDieCatch(CRASH_SNAPSHOT_FLAG, true);
     DFX_RestoreDumpableState();
     return 0;
+}
+
+int DfxNotifySetExitCatchAbort(bool enable, bool isDebuggable)
+{
+    if (!isDebuggable) {
+        return 0;
+    }
+    if (!DFX_SetDumpableState()) {
+        return -1;
+    }
+    bool success = SetDieCatch(EXIT_CATCH_ABORT_MASK, enable);
+    DFX_RestoreDumpableState();
+    return success ? 0 : -1;
 }

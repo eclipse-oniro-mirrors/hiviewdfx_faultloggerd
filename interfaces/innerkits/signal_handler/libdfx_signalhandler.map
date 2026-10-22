@@ -3,6 +3,7 @@
     extern "C" {
         SetThreadInfoCallback;
         DfxNotifyWatchdogThreadStart;
+        DfxNotifySetExitCatchAbort;
         DFX_SetAsyncStackCallback;
         DFX_GetAppRunningUniqueId;
         DFX_SetAppRunningUniqueId;

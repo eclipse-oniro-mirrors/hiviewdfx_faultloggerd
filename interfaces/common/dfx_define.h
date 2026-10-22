@@ -33,6 +33,9 @@
 #define DUMPCATCHER_TIMEOUT 15
 #define COREDUMP_TIMEOUT 30
 
+#define CRASH_SNAPSHOT_FLAG 0x8U
+#define EXIT_CATCH_ABORT_MASK 0x7U
+
 #ifndef NAME_MAX
 #define NAME_MAX         255
 #endif
