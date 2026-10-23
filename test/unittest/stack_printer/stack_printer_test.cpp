@@ -932,5 +932,32 @@ HWTEST_F(StackPrinterTest, StackPrinterTest_010, TestSize.Level2)
 
     GTEST_LOG_(INFO) << "StackPrinterTest_010: end.";
 }
+
+/**
+ * @tc.name: StackPrinterTest011
+ * @tc.desc: test SampledFrame deserialization with invalid timestampsSize
+ * @tc.type: FUNC
+ */
+HWTEST_F(StackPrinterTest, StackPrinterTest_011, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "StackPrinterTest_011: start.";
+    // SampledFrame string to be deserialized: mapSize + \n + tid + vecSize + frameinfo + \n
+    // frameinfo: indent + count + level + pc + isLeaf + timestamps.size()
+    // timestampsSize exceeds the max bound, operator>> should set failbit and reject huge allocation
+    std::stringstream ss("1\n" + std::to_string(gettid()) + " 1 1 5 3 9630076 0 512001\n");
+    auto result = StackPrinter::DeserializeSampledFrameMap(ss);
+    ASSERT_TRUE(ss.fail());
+    ASSERT_TRUE(result.empty());
+
+    // timestampsSize is a huge untrusted value, operator>> should reject it before resize
+    ss.str("");
+    ss.clear();
+    ss.str("1\n" + std::to_string(gettid()) + " 1 1 5 3 9630076 0 4294967296\n");
+    result = StackPrinter::DeserializeSampledFrameMap(ss);
+    ASSERT_TRUE(ss.fail());
+    ASSERT_TRUE(result.empty());
+
+    GTEST_LOG_(INFO) << "StackPrinterTest_011: end.";
+}
 }  // namespace HiviewDFX
 }  // namespace OHOS
