@@ -115,7 +115,7 @@ bool FormatThreadKernelStack(const std::string& kernelStack, DfxThreadStack& thr
         base = 16; // 16 : Hexadecimal
         frame.relPc = strtoull((*it)[1].str().c_str(), nullptr, base);
         frame.mapName = (*it)[2].str(); // 2 : second of searched element is map name
-        if (prevIsStatic) {
+        if (prevIsStatic && DfxMaps::IsJsFrame(frame)) {
             frame.frameType = FrameType::STATIC_JS_FRAME;
         }
         if (parser) {

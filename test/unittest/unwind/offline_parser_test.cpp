@@ -336,5 +336,80 @@ HWTEST_F(DfxOfflineParserTest, DfxOfflineParserTest015, TestSize.Level2)
     ASSERT_FALSE(parser.ParseNativeSymbol(frame));
     GTEST_LOG_(INFO) << "DfxOfflineParserTest015: end.";
 }
+
+/**
+ * @tc.name: DfxOfflineParserTest016
+ * @tc.desc: test ParseBuildIdJsSymbolWithFrames marks js frame after static ark frame
+ * @tc.type: FUNC
+ */
+HWTEST_F(DfxOfflineParserTest, DfxOfflineParserTest016, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxOfflineParserTest016: start.";
+    DfxOfflineParser parser("testhap");
+    std::vector<DfxFrame> frames;
+    DfxFrame staticArkFrame;
+    staticArkFrame.mapName = "/system/lib64/" + DfxMap::GetStaticArkLibName();
+    frames.emplace_back(staticArkFrame);
+    DfxFrame jsFrame;
+    jsFrame.mapName = "xxx";
+    jsFrame.isJsFrame = true;
+    frames.emplace_back(jsFrame);
+    parser.ParseBuildIdJsSymbolWithFrames(frames);
+    ASSERT_EQ(frames[0].frameType, FrameType::NATIVE_FRAME);
+    ASSERT_EQ(frames[1].frameType, FrameType::STATIC_JS_FRAME);
+    GTEST_LOG_(INFO) << "DfxOfflineParserTest016: end.";
+}
+
+/**
+ * @tc.name: DfxOfflineParserTest017
+ * @tc.desc: test ParseBuildIdJsSymbolWithFrames does not mark native frame after static ark frame
+ * @tc.type: FUNC
+ */
+HWTEST_F(DfxOfflineParserTest, DfxOfflineParserTest017, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxOfflineParserTest017: start.";
+    DfxOfflineParser parser("testhap");
+    std::vector<DfxFrame> frames;
+    DfxFrame staticArkFrame;
+    staticArkFrame.mapName = "/system/lib64/" + DfxMap::GetStaticArkLibName();
+    frames.emplace_back(staticArkFrame);
+    DfxFrame nativeFrame;
+    nativeFrame.mapName = "/system/lib/ld-musl-aarch64.so.1";
+    frames.emplace_back(nativeFrame);
+    DfxFrame jsFrame;
+    jsFrame.mapName = "xxx";
+    jsFrame.isJsFrame = true;
+    frames.emplace_back(jsFrame);
+    parser.ParseBuildIdJsSymbolWithFrames(frames);
+    ASSERT_EQ(frames[0].frameType, FrameType::NATIVE_FRAME);
+    ASSERT_EQ(frames[1].frameType, FrameType::NATIVE_FRAME);
+    ASSERT_EQ(frames[2].frameType, FrameType::NATIVE_FRAME);
+    GTEST_LOG_(INFO) << "DfxOfflineParserTest017: end.";
+}
+
+#if defined(__aarch64__)
+/**
+ * @tc.name: DfxOfflineParserTest018
+ * @tc.desc: test FormatThreadKernelStack only marks js frame after static ark frame
+ * @tc.type: FUNC
+ */
+HWTEST_F(DfxOfflineParserTest, DfxOfflineParserTest018, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxOfflineParserTest018: start.";
+    std::string staticArkSo = "/system/lib64/" + DfxMap::GetStaticArkLibName();
+    std::string kernelStack = "name=testthread, tid=100, ppid=1, cpu=0, prio=99, pid=200):\n";
+    kernelStack += "[0000000000001000]<entry+32/64> (" + staticArkSo + ")\n";
+    kernelStack += "[0000000000002000]<onShow+8/16> (entry.hap)\n";
+    kernelStack += "[0000000000003000]<memcpy+32/64> (ld-musl-aarch64.so.1)\n";
+    DfxThreadStack threadStack;
+    ASSERT_TRUE(FormatThreadKernelStack(kernelStack, threadStack));
+    ASSERT_EQ(threadStack.tid, 100);
+    ASSERT_EQ(threadStack.frames.size(), static_cast<size_t>(3));
+    ASSERT_EQ(threadStack.frames[0].frameType, FrameType::NATIVE_FRAME);
+    ASSERT_EQ(threadStack.frames[1].frameType, FrameType::STATIC_JS_FRAME);
+    ASSERT_EQ(threadStack.frames[2].frameType, FrameType::NATIVE_FRAME);
+    GTEST_LOG_(INFO) << "DfxOfflineParserTest018: end.";
+}
+#endif
 } // namespace HiviewDFX
 } // namespace OHOS
