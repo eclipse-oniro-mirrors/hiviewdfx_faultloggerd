@@ -13,11 +13,20 @@
  * limitations under the License.
  */
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <thread>
+
+#ifdef HISYSEVENT_ENABLE
+#include "hisysevent_listener.h"
+#include "hisysevent_manager.h"
+#endif
 
 #include "directory_ex.h"
 #include "faultloggerd_test.h"
@@ -75,6 +84,61 @@ SmartFd CreateTestFile(const string& fileName, uint32_t fileSize = 1)
     }
     return fd;
 }
+
+bool WaitForFileSize(const string &fileName, uint64_t expectSize, uint32_t timeoutSec)
+{
+    constexpr uint32_t pollIntervalMs = 500;
+    constexpr uint32_t msPerSecond = 1000;
+    for (uint32_t waitedMs = 0; waitedMs < timeoutSec * msPerSecond; waitedMs += pollIntervalMs) {
+        struct stat st;
+        if (stat(fileName.c_str(), &st) == 0 && static_cast<uint64_t>(st.st_size) == expectSize) {
+            return true;
+        }
+        this_thread::sleep_for(chrono::milliseconds(pollIntervalMs));
+    }
+    return false;
+}
+
+#ifdef HISYSEVENT_ENABLE
+class FileSizeMonitorEventListener : public HiSysEventListener {
+public:
+    void OnEvent(std::shared_ptr<HiSysEventRecord> sysEvent) override
+    {
+        if (sysEvent == nullptr || sysEvent->GetEventName() != "CPP_CRASH_NO_LOG") {
+            return;
+        }
+        int64_t happenTime = 0;
+        bool isStaleEvent = sysEvent->GetParamValue("HAPPEN_TIME", happenTime) == 0 &&
+            happenTime < startTime_.load();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!isStaleEvent) {
+            eventReceived_ = true;
+            condition_.notify_all();
+        }
+    }
+
+    void OnServiceDied() override {}
+
+    void SetStartTime(int64_t startTime)
+    {
+        startTime_.store(startTime);
+        std::lock_guard<std::mutex> lock(mutex_);
+        eventReceived_ = false;
+    }
+
+    bool WaitForEvent(uint32_t timeoutSec)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, chrono::seconds(timeoutSec), [this] { return eventReceived_; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool eventReceived_ = false;
+    std::atomic<int64_t> startTime_ {0};
+};
+#endif
 }
 
 class TempFileManagerTest : public testing::Test {
@@ -389,6 +453,52 @@ HWTEST_F(TempFileManagerTest, FileSizeMonitorTest01, TestSize.Level2)
     ASSERT_EQ(stat(testFileName.c_str(), &st), 0);
     ASSERT_EQ(static_cast<uint64_t>(st.st_size), 2ULL << 10); // 2KB
 }
+
+/**
+ * @tc.name: FileSizeMonitorOverLimitTest01
+ * @tc.desc: the periodic size monitor truncates an over-limit file which is still being written.
+ * @tc.type: FUNC
+ */
+HWTEST_F(TempFileManagerTest, FileSizeMonitorOverLimitTest01, TestSize.Level2)
+{
+    constexpr uint32_t overLimitBlocks = 6;          // 6 : file size 6KB, larger than the 5KB limit
+    constexpr uint32_t waitTimeoutSec = 20;          // 20 : covers more than one 10s monitor interval
+    constexpr uint64_t truncatedSize = 5ULL << 10;   // 5KB : maxSingleFileSize of cppcrash in test config
+    string testFileName = GetFileName(CPP_CRASH_FILE, 0);
+    // keep fd open to avoid IN_CLOSE_WRITE, so only the periodic monitor can handle the file
+    SmartFd fd = CreateTestFile(testFileName, overLimitBlocks);
+    ASSERT_TRUE(fd);
+    ASSERT_TRUE(WaitForFileSize(testFileName, truncatedSize, waitTimeoutSec));
+}
+
+#ifdef HISYSEVENT_ENABLE
+/**
+ * @tc.name: FileSizeMonitorEventTest01
+ * @tc.desc: the periodic size monitor reports a CPP_CRASH_NO_LOG event for an over-limit file.
+ * @tc.type: FUNC
+ */
+HWTEST_F(TempFileManagerTest, FileSizeMonitorEventTest01, TestSize.Level2)
+{
+    constexpr uint32_t overLimitBlocks = 6;   // 6 : file size 6KB, larger than the 5KB limit
+    constexpr uint32_t eventTimeoutSec = 25;  // 25 : 10s monitor interval plus event dispatch delay
+    auto listener = std::make_shared<FileSizeMonitorEventListener>();
+    auto now = std::chrono::system_clock::now();
+    listener->SetStartTime(std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count());
+    ListenerRule eventRule("RELIABILITY", "CPP_CRASH_NO_LOG", RuleType::WHOLE_WORD);
+    std::vector<ListenerRule> sysRules;
+    sysRules.push_back(eventRule);
+    ASSERT_EQ(HiSysEventManager::AddListener(listener, sysRules), 0);
+
+    string testFileName = GetFileName(CPP_CRASH_FILE, 0);
+    // keep fd open to avoid IN_CLOSE_WRITE, so only the periodic monitor can handle the file
+    SmartFd fd = CreateTestFile(testFileName, overLimitBlocks);
+    ASSERT_TRUE(fd);
+    bool eventReceived = listener->WaitForEvent(eventTimeoutSec);
+    ASSERT_EQ(HiSysEventManager::RemoveListener(listener), 0);
+    ASSERT_TRUE(eventReceived);
+}
+#endif
 
 /**
  * @tc.name: ScanCurrentFilesOnStartTest05

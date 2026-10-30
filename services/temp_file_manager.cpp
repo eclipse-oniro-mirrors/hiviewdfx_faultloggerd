@@ -232,6 +232,27 @@ uint64_t CheckTempFileSize(std::map<const SingleFileConfig*, std::list<std::stri
     return fileSize;
 }
 
+void HandleFileOverLimit(const std::string& filePath, uint64_t fileSize,
+    uint64_t maxSingleFileSize, OverFileSizeAction overFileSizeAction)
+{
+    DFXLOGW("file %{public}s size %{public}" PRIu64 " exceeds limit %{public}" PRIu64,
+        filePath.c_str(), fileSize, maxSingleFileSize);
+#ifndef HISYSEVENT_DISABLE
+    std::string summary = "File exceeds max limit " + std::to_string(maxSingleFileSize) +
+        " filePath " + filePath + " size " + std::to_string(fileSize);
+    auto now = std::chrono::system_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+    HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::RELIABILITY, "CPP_CRASH_NO_LOG",
+        OHOS::HiviewDFX::HiSysEvent::EventType::FAULT,
+        "HAPPEN_TIME", timestamp, "SUMMARY", summary);
+#endif
+    SingleFileConfig config;
+    config.maxSingleFileSize = maxSingleFileSize;
+    config.overFileSizeAction = overFileSizeAction;
+    CheckTempFileSize(config, filePath);
+}
+
 void GetTempFiles(const SingleFileConfig& tempFileConfig, std::list<std::string>& tempFiles)
 {
     std::vector<std::string> files;
@@ -589,27 +610,29 @@ void TempFileManager::TempFileWatcher::HandleFileCreate(const std::string& fileP
         ForceRemoveFileIfNeed(fileConfig, files);
     }
 
-    if (fileConfig.maxSingleFileSize > 0) {
-        auto taskId = TaskQueueAdapter::AddPeriodicTask(
-            [filePath, maxSingleFileSize = fileConfig.maxSingleFileSize,
-             overFileSizeAction = fileConfig.overFileSizeAction]() -> PeriodicTaskResult {
-                if (access(filePath.c_str(), F_OK) != 0) {
-                    return PeriodicTaskResult::REMOVE;
-                }
-                uint64_t fileSize = GetFileSize(filePath);
-                if (fileSize > maxSingleFileSize) {
-                    DFXLOGW("file %{public}s size %{public}" PRIu64 " exceeds limit %{public}" PRIu64,
-                        filePath.c_str(), fileSize, maxSingleFileSize);
-                    SingleFileConfig config;
-                    config.maxSingleFileSize = maxSingleFileSize;
-                    config.overFileSizeAction = overFileSizeAction;
-                    CheckTempFileSize(config, filePath);
-                }
-                return PeriodicTaskResult::KEEP;
-            }, FILE_SIZE_MONITOR_INTERVAL, FILE_SIZE_MONITOR_INTERVAL);
-        if (taskId > 0) {
-            fileSizeMonitorTasks_[filePath] = taskId;
-        }
+    StartFileSizeMonitor(filePath, fileConfig);
+}
+
+void TempFileManager::TempFileWatcher::StartFileSizeMonitor(const std::string& filePath,
+    const SingleFileConfig& fileConfig)
+{
+    if (fileConfig.maxSingleFileSize == 0) {
+        return;
+    }
+    auto taskId = TaskQueueAdapter::AddPeriodicTask(
+        [filePath, maxSingleFileSize = fileConfig.maxSingleFileSize,
+         overFileSizeAction = fileConfig.overFileSizeAction]() -> PeriodicTaskResult {
+            if (access(filePath.c_str(), F_OK) != 0) {
+                return PeriodicTaskResult::REMOVE;
+            }
+            uint64_t fileSize = GetFileSize(filePath);
+            if (fileSize > maxSingleFileSize) {
+                HandleFileOverLimit(filePath, fileSize, maxSingleFileSize, overFileSizeAction);
+            }
+            return PeriodicTaskResult::KEEP;
+        }, FILE_SIZE_MONITOR_INTERVAL, FILE_SIZE_MONITOR_INTERVAL);
+    if (taskId > 0) {
+        fileSizeMonitorTasks_[filePath] = taskId;
     }
 }
 
