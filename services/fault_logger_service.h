@@ -192,7 +192,7 @@ private:
         TempFileListener(SmartFd fd, const std::string& watchPath, const pid_t pid,
             std::set<pid_t> nsPids);
         void HandlerTempFile(const std::string& filePath);
-        static int32_t ExtractPidFromFile(const std::string& filePath);
+        int32_t ExtractPidFromFile(const std::string& filePath);
         void CreateSymlinkForPid(int32_t nsPid, const std::string& targetPath);
         pid_t pid_;
         std::string watchPath_;

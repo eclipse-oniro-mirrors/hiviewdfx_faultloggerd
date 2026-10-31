@@ -49,10 +49,7 @@ MinidumpMemoryReader::MinidumpMemoryReader(const std::string& path)
         auto fileStream = std::make_shared<std::ifstream>();
         streamBuf_ = new char[DEFAULT_READ_AHEAD_SIZE];
         fileStream->rdbuf()->pubsetbuf(streamBuf_, DEFAULT_READ_AHEAD_SIZE);
-        auto realPath = RealPath(path);
-        if (realPath != nullptr) {
-            fileStream->open(realPath.get(), std::ios::binary);
-        }
+        fileStream->open(path.c_str(), std::ios::binary);
         stream_ = fileStream;
         InitStreamSize();
     }
@@ -72,11 +69,7 @@ MinidumpMemoryReader::~MinidumpMemoryReader()
 
 bool MinidumpMemoryReader::InitMmap(const std::string& path)
 {
-    auto realPath = RealPath(path);
-    SmartFd fd;
-    if (realPath != nullptr) {
-        fd = SmartFd(open(realPath.get(), O_RDONLY | O_CLOEXEC));
-    }
+    SmartFd fd = SmartFd(open(path.c_str(), O_RDONLY | O_CLOEXEC));
     if (!fd) {
         DFXLOGE("MinidumpMemoryReader open failed for %{public}s errno=%{public}d", path.c_str(), errno);
         return false;
