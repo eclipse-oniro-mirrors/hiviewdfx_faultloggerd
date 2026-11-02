@@ -138,6 +138,11 @@ if (defined(ohos_lite)) {
       "jsoncpp:jsoncpp",
     ]
 
+    if (defined(global_parts_info.hiviewdfx_hisysevent)) {
+      external_deps += [ "hisysevent:libhisyseventmanager" ]
+      defines += [ "HISYSEVENT_ENABLE" ]
+    }
+
     if (build_selinux) {
       external_deps += [ "selinux:libselinux" ]
       cflags_cc += [ "-DHAS_LIB_SELINUX" ]

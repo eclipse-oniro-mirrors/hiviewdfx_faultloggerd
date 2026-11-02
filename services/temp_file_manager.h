@@ -51,6 +51,7 @@ private:
         TempFileWatcher(TempFileManager& tempFileManager, SmartFd fd);
         void HandleEvent(uint32_t eventMask, const std::string& filePath, const SingleFileConfig& fileConfig);
         void HandleFileCreate(const std::string& filePath, const SingleFileConfig& fileConfig);
+        void StartFileSizeMonitor(const std::string& filePath, const SingleFileConfig& fileConfig);
         void HandleFileDeleteOrMove(const std::string& filePath, const SingleFileConfig& fileConfig);
         void HandleDirRemoved();
         void HandleFileWrite(const std::string& filePath, const SingleFileConfig& fileConfig);
