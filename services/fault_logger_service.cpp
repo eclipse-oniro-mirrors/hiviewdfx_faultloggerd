@@ -883,17 +883,17 @@ int32_t BinderPidsDumpService::OnRequest(const std::string& socketName, int32_t 
     std::string timeStr = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
     std::string binderInfoPath = FaultLoggerConfig::GetInstance().GetTempFileConfig().tempFilePath +
         "/peer_binder_stack-" + std::to_string(requestData.pid) + "-" + timeStr;
-    int32_t fd = OHOS_TEMP_FAILURE_RETRY(
-        open(binderInfoPath.c_str(), O_RDWR | O_TRUNC | O_CREAT | O_NOFOLLOW, S_IRUSR | S_IWUSR | S_IRGRP));
-    if (fd < 0) {
+    SmartFd fileFd(OHOS_TEMP_FAILURE_RETRY(
+        open(binderInfoPath.c_str(), O_RDWR | O_TRUNC | O_CREAT | O_NOFOLLOW, S_IRUSR | S_IWUSR | S_IRGRP)));
+    if (!fileFd) {
         DFXLOGE("%{public}s :: failed to open file %{public}s, errno: %{public}d",
             FAULTLOGGERD_SERVICE_TAG, binderInfoPath.c_str(), errno);
         return ResponseCode::ABNORMAL_SERVICE;
     }
     int32_t responseData = ResponseCode::REQUEST_SUCCESS;
     SendMsgToSocket(connectionFd, &responseData, sizeof(responseData));
+    int fd = fileFd.GetFd();
     SendFileDescriptorToSocket(connectionFd, &fd, 1);
-    close(fd);
     return ResponseCode::REQUEST_SUCCESS;
 }
 
@@ -997,7 +997,15 @@ void BinderPidsDumpService::TempFileListener::CreateSymlinkForPid(int32_t nsPid,
 int32_t BinderPidsDumpService::TempFileListener::ExtractPidFromFile(const std::string& filePath)
 {
     int pid = -1;
-    FILE* file = fopen(filePath.c_str(), "r");
+    auto realPath = RealPath(filePath);
+    if (!realPath) {
+        return pid;
+    }
+    std::string watchPath = watchPath_ + "/";
+    if (strncmp(realPath.get(), watchPath.c_str(), watchPath.size()) != 0) {
+        return pid;
+    }
+    FILE* file = fopen(realPath.get(), "r");
     if (!file) {
         return pid;
     }
