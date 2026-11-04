@@ -253,6 +253,24 @@ void ElfParser::GetAdltMapSectionInfo(uint64_t shOffset, uint64_t shSize)
     }
 }
 
+void ElfParser::GetGnuDebugDataSectionInfo(uint64_t shOffset, uint64_t shSize)
+{
+    auto mmapPtr = static_cast<uint8_t *>(mmap_->Get());
+    if (mmapPtr == nullptr) {
+        return;
+    }
+    uint64_t mmapSize = MmapSize();
+    uint64_t endOffset = 0;
+    if (shOffset >= mmapSize || __builtin_add_overflow(shOffset, shSize, &endOffset) ||
+        endOffset > mmapSize) {
+        DFXLOGE("Invalid .gnu_debugdata section, offset: 0x%{public}" PRIx64
+            ", size: 0x%{public}" PRIx64 ", mmapSize: %{public}" PRIu64, shOffset, shSize, mmapSize);
+        return;
+    }
+    gnuDebugDataHdr_.address = reinterpret_cast<uintptr_t>(mmapPtr + shOffset);
+    gnuDebugDataHdr_.size = static_cast<uintptr_t>(shSize);
+}
+
 template <typename ShdrType>
 void ElfParser::ExtractSymSectionHeadersInfo(const ShdrType& shdr)
 {
@@ -271,6 +289,42 @@ void ElfParser::ExtractSymSectionHeadersInfo(const ShdrType& shdr)
 }
 
 template <typename EhdrType, typename ShdrType>
+void ElfParser::ExtractShdrInfo(const EhdrType& ehdr, const ShdrType& shdr, size_t index)
+{
+    std::string secName;
+    if (!GetSectionNameByIndex(secName, shdr.sh_name)) {
+        DFXLOGE("Failed to get section name");
+        return;
+    }
+
+    if (shdr.sh_size > 0) {
+        if (secName == ADLTSTRTAB) { // .adlt.strtab
+            GetAdltStrTabSectionInfo(shdr.sh_offset, shdr.sh_size);
+        } else if (secName == ADLTMAP) { // .adlt.map
+            GetAdltMapSectionInfo(shdr.sh_offset, shdr.sh_size);
+        }
+    }
+
+    if (shdr.sh_size != 0 && secName == GNU_DEBUGDATA) {
+        GetGnuDebugDataSectionInfo(shdr.sh_offset, shdr.sh_size);
+    }
+
+    ShdrInfo shdrInfo;
+    shdrInfo.addr = static_cast<uint64_t>(shdr.sh_addr);
+    shdrInfo.entSize = static_cast<uint64_t>(shdr.sh_entsize);
+    shdrInfo.size = static_cast<uint64_t>(shdr.sh_size);
+    shdrInfo.offset = static_cast<uint64_t>(shdr.sh_offset);
+    shdrInfoPairs_.emplace(std::make_pair(index, secName), shdrInfo);
+
+    if (shdr.sh_type == SHT_SYMTAB || shdr.sh_type == SHT_DYNSYM) {
+        if (shdr.sh_link >= ehdr.e_shnum) {
+            return;
+        }
+        ExtractSymSectionHeadersInfo(shdr);
+    }
+}
+
+template <typename EhdrType, typename ShdrType>
 bool ElfParser::ExtractSectionHeadersInfo(const EhdrType& ehdr, ShdrType& shdr)
 {
     uint64_t offset = ehdr.e_shoff;
@@ -286,42 +340,7 @@ bool ElfParser::ExtractSectionHeadersInfo(const EhdrType& ehdr, ShdrType& shdr)
         if (!Read((uintptr_t)offset, &shdr, sizeof(shdr))) {
             return false;
         }
-
-        std::string secName;
-        if (!GetSectionNameByIndex(secName, shdr.sh_name)) {
-            DFXLOGE("Failed to get section name");
-            continue;
-        }
-
-        if (shdr.sh_size > 0) {
-            if (secName == ADLTSTRTAB) { // .adlt.strtab
-                GetAdltStrTabSectionInfo(shdr.sh_offset, shdr.sh_size);
-            } else if (secName == ADLTMAP) { // .adlt.map
-                GetAdltMapSectionInfo(shdr.sh_offset, shdr.sh_size);
-            }
-        }
-
-        if (shdr.sh_size != 0 && secName == GNU_DEBUGDATA) {
-            auto mmapPtr = static_cast<uint8_t *>(mmap_->Get());
-            if (mmapPtr != nullptr) {
-                gnuDebugDataHdr_.address = reinterpret_cast<uintptr_t>(shdr.sh_offset + mmapPtr);
-                gnuDebugDataHdr_.size = static_cast<uintptr_t>(shdr.sh_size);
-            }
-        }
-
-        ShdrInfo shdrInfo;
-        shdrInfo.addr = static_cast<uint64_t>(shdr.sh_addr);
-        shdrInfo.entSize = static_cast<uint64_t>(shdr.sh_entsize);
-        shdrInfo.size = static_cast<uint64_t>(shdr.sh_size);
-        shdrInfo.offset = static_cast<uint64_t>(shdr.sh_offset);
-        shdrInfoPairs_.emplace(std::make_pair(i, secName), shdrInfo);
-
-        if (shdr.sh_type == SHT_SYMTAB || shdr.sh_type == SHT_DYNSYM) {
-            if (shdr.sh_link >= ehdr.e_shnum) {
-                continue;
-            }
-            ExtractSymSectionHeadersInfo(shdr);
-        }
+        ExtractShdrInfo(ehdr, shdr, i);
     }
     return true;
 }
