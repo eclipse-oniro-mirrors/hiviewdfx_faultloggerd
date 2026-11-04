@@ -205,6 +205,10 @@ bool ElfParser::ParseProgramHeaders(const EhdrType& ehdr)
                 ptAdlt = true;
                 break;
             case PT_DYNAMIC:
+                if (phdr.p_offset >= MmapSize()) {
+                    DFXLOGE("Invalid dynamic offset: 0x%{public}" PRIx64, static_cast<uint64_t>(phdr.p_offset));
+                    continue;
+                }
                 dynamicOffset_ = phdr.p_offset;
                 break;
             default:
@@ -363,13 +367,24 @@ bool ElfParser::ParseElfDynamic()
     if (dynamicOffset_ == 0 || mmap_->Get() == nullptr) {
         return false;
     }
-
-    DynType* dyn = reinterpret_cast<DynType *>(dynamicOffset_ + static_cast<char *>(mmap_->Get()));
-    if (dyn == nullptr) {
+    uint64_t dynEnd = 0;
+    if (__builtin_add_overflow(dynamicOffset_, sizeof(DynType), &dynEnd) || dynEnd > mmap_->Size()) {
+        DFXLOGE("Invalid dynamic offset: 0x%{public}" PRIx64 ", mmapSize: %{public}" PRIuPTR,
+            dynamicOffset_, mmap_->Size());
         return false;
     }
-    const uint8_t* mmapEnd = static_cast<const uint8_t*>(mmap_->Get()) + mmap_->Size();
-    for (; reinterpret_cast<const uint8_t*>(dyn) + sizeof(DynType) <= mmapEnd &&
+
+    uintptr_t dynAddr = 0;
+    if (__builtin_add_overflow(reinterpret_cast<uintptr_t>(mmap_->Get()), dynamicOffset_, &dynAddr)) {
+        DFXLOGE("Pointer overflow, mmapBase: 0x%{public}" PRIx64 ", dynamicOffset: 0x%{public}" PRIx64,
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mmap_->Get())), dynamicOffset_);
+        return false;
+    }
+    DynType* dyn = reinterpret_cast<DynType *>(dynAddr);
+    const uint8_t* mmapBase = static_cast<const uint8_t*>(mmap_->Get());
+    const uint8_t* mmapEnd = mmapBase + mmap_->Size();
+    for (; reinterpret_cast<const uint8_t*>(dyn) >= mmapBase &&
+         reinterpret_cast<const uint8_t*>(dyn) + sizeof(DynType) <= mmapEnd &&
          dyn->d_tag != DT_NULL; ++dyn) {
         if (dyn->d_tag == DT_PLTGOT) {
             dtPltGotAddr_ = dyn->d_un.d_ptr;
