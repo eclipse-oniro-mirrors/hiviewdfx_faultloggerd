@@ -61,6 +61,7 @@ enum class FrameType: uint8_t {
     STATIC_JS_FRAME = 2,
     JSVM_FRAME = 3,
     ARKWEB_JS_FRAME = 4,
+    DEX_FRAME = 5,
 };
 /**
  * @brief Native Frame struct

@@ -46,6 +46,8 @@ public:
 private:
     DumpCatcher() = default;
     std::string GetBundleName(int32_t pid) const;
+    bool IsContainerProcess(int32_t pid) const;
+    void DumpContainerStack(const DumpOptions& dumpOpt) const;
     DISALLOW_COPY_AND_MOVE(DumpCatcher);
 };
 } // namespace HiviewDFX

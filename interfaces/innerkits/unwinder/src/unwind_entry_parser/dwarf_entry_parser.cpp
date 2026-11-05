@@ -13,6 +13,9 @@
  * limitations under the License.
  */
 
+#include <algorithm>
+#include <mutex>
+#include <unordered_map>
 #include "dwarf_entry_parser.h"
 #include <securec.h>
 #include "dfx_log.h"
@@ -27,29 +30,133 @@ namespace {
 #define LOG_DOMAIN 0xD002D11
 #define LOG_TAG "DfxDwarfEntryParser"
 }
-bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei)
+bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei,
+    const FrameDescEntry** cachedFde)
 {
     DFX_TRACE_SCOPED_DLSYM("DwarfEntryParserLinearSearchEntry");
+    uintptr_t tableData = uti.tableData;
+    *cachedFde = nullptr;
+    const uintptr_t mmapId = uti.isDebugFrame
+        ? reinterpret_cast<uintptr_t>(uti.debugFrameMmap.get()) : 0;
+
+    if (uti.isDebugFrame) {
+        pc = pc - uti.segbase;
+    }
+
+    constexpr uintptr_t kSmallSectionFdeCount = 64;
+    constexpr uintptr_t kSmallSectionBytes = 8 * 1024;
+    uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
+    bool smallSection = (uti.tableLen < kSmallSectionFdeCount);
+    if (!smallSection && uti.isDebugFrame && uti.debugFrameEnd > tableData &&
+        (uti.debugFrameEnd - tableData) < kSmallSectionBytes) {
+        smallSection = true;
+    }
+    if (smallSection) {
+        uintptr_t fdeCount = uti.tableLen;
+        uintptr_t i = 0;
+        uintptr_t ptr = tableData;
+        FrameDescEntry fdeInfo;
+        while (i++ < fdeCount && ptr < endBoundary) {
+            uintptr_t fdeAddr = ptr;
+            if (GetCieOrFde(ptr, fdeInfo)) {
+                if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
+                    uei.unwindInfo = (void *)(fdeAddr);
+                    uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
+                    return true;
+                }
+            } else {
+                break;
+            }
+        }
+        return false;
+    }
+
+    const std::vector<FdeIndexEntry>* index = nullptr;
+    for (auto it = fdeIndexCache_.begin(); it != fdeIndexCache_.end(); ++it) {
+        if (it->tableData == tableData && it->mmapId == mmapId) {
+            if (it != fdeIndexCache_.begin()) {
+                fdeIndexCache_.splice(fdeIndexCache_.begin(), fdeIndexCache_, it);
+            }
+            index = &(fdeIndexCache_.front().entries);
+            break;
+        }
+    }
+    if (index == nullptr) {
+        index = BuildFdeIndex(uti);
+    }
+    if (index == nullptr || index->empty()) {
+        return false;
+    }
+    auto it = std::upper_bound(index->begin(), index->end(), pc,
+        [](uintptr_t value, const FdeIndexEntry& entry) { return value < entry.pcEnd; });
+    size_t scanned = 0;
+    for (; it != index->end() && scanned < 256; ++it, ++scanned) { // 256 : max scanned
+        if (pc >= it->pcStart && pc < it->pcEnd) {
+            uei.unwindInfo = (void *)(it->fdeAddr);
+            *cachedFde = it->entry;
+            uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
+            return true;
+        }
+    }
+    return false;
+}
+
+const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIndex(const UnwindTableInfo& uti)
+{
+    DFX_TRACE_SCOPED_DLSYM("DwarfEntryParserBuildFdeIndex");
     uintptr_t fdeCount = uti.tableLen;
     uintptr_t tableData = uti.tableData;
-    DFXLOGU("LinearSearchEntry tableData:%{public}p, tableLen: %{public}u", (void*)tableData, (uint32_t)fdeCount);
+    uintptr_t endBoundary = uti.isDebugFrame ? uti.debugFrameEnd : uti.endPc;
+    const uintptr_t mmapId = uti.isDebugFrame
+        ? reinterpret_cast<uintptr_t>(uti.debugFrameMmap.get()) : 0;
+    constexpr size_t maxSectionEntries = 512 * 1024;
+    constexpr size_t maxCachedSections = 32;
+    constexpr size_t maxTotalEntries = 1024 * 1024;
+
+    std::vector<FdeIndexEntry> entries;
     uintptr_t i = 0;
     uintptr_t ptr = tableData;
     FrameDescEntry fdeInfo;
-    while (i++ < fdeCount && ptr < uti.endPc) {
+    while (i++ < fdeCount && ptr < endBoundary && entries.size() < maxSectionEntries) {
         uintptr_t fdeAddr = ptr;
-        if (GetCieOrFde(ptr, fdeInfo)) {
-            if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
-                DFXLOGU("Fde entry addr: %{public}" PRIx64 "", (uint64_t)fdeAddr);
-                uei.unwindInfo = (void *)(fdeAddr);
-                uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
-                return true;
+        uintptr_t entryPtr = ptr;
+        bool isCieEntry = false;
+        ParseCieOrFdeHeader(entryPtr, fdeInfo, isCieEntry);
+        bool ok;
+        if (isCieEntry) {
+            ok = ParseCie(fdeAddr, entryPtr, fdeInfo.cie);
+        } else {
+            ok = ParseFde(fdeAddr, entryPtr, fdeInfo);
+        }
+        if (ok) {
+            if (!isCieEntry && fdeInfo.pcEnd > fdeInfo.pcStart) {
+                const FrameDescEntry* parsed = nullptr;
+                auto cached = fdeEntries_.find(fdeAddr);
+                if (cached != fdeEntries_.end()) {
+                    parsed = &cached->second;
+                }
+                entries.push_back({fdeInfo.pcStart, fdeInfo.pcEnd, fdeAddr, parsed});
             }
         } else {
             break;
         }
+        ptr = isCieEntry ? fdeInfo.cie.instructionsEnd : fdeInfo.instructionsEnd;
     }
-    return false;
+    std::sort(entries.begin(), entries.end(),
+        [](const FdeIndexEntry& a, const FdeIndexEntry& b) { return a.pcEnd < b.pcEnd; });
+    fdeIndexCache_.push_front({tableData, mmapId, std::move(entries)});
+    size_t total = fdeIndexCache_.front().entries.size();
+    for (auto& section : fdeIndexCache_) {
+        if (&section != &fdeIndexCache_.front()) {
+            total += section.entries.size();
+        }
+    }
+    while (fdeIndexCache_.size() > 1 &&
+           (fdeIndexCache_.size() > maxCachedSections || total > maxTotalEntries)) {
+        total -= fdeIndexCache_.back().entries.size();
+        fdeIndexCache_.pop_back();
+    }
+    return &fdeIndexCache_.front().entries;
 }
 
 bool DwarfEntryParser::SearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei)
@@ -116,30 +223,55 @@ bool DwarfEntryParser::Step(uintptr_t pc, const UnwindTableInfo& uti, std::share
         DFXLOGE("memory or rs is nullptr!");
         return false;
     }
+    SetDebugFrameMode(uti.isDebugFrame, uti.tableData);
+
+    std::shared_ptr<DfxMemory> originalMemory = memory_;
+    if (uti.isDebugFrame && uti.debugFrameMmap != nullptr) {
+        memory_ = uti.debugFrameMmap;
+    }
+
     struct UnwindEntryInfo uei;
-    if ((!uti.isLinear && !SearchEntry(pc, uti, uei)) || (uti.isLinear && !LinearSearchEntry(pc, uti, uei))) {
+    const FrameDescEntry* cachedFde = nullptr;
+    if ((!uti.isLinear && !SearchEntry(pc, uti, uei)) ||
+        (uti.isLinear && !LinearSearchEntry(pc, uti, uei, &cachedFde))) {
         DFXLOGU("Failed to search unwind entry");
+        memory_ = originalMemory;
         return false;
     }
     memory_->SetDataOffset(uti.segbase);
 
-    FrameDescEntry fdeInfo;
-    if (!ParseFde((uintptr_t)uei.unwindInfo, (uintptr_t)uei.unwindInfo, fdeInfo)) {
-        DFXLOGE("Failed to parse fde?");
-        lastErrorData_.SetAddrAndCode((uintptr_t)uei.unwindInfo, UNW_ERROR_DWARF_INVALID_FDE);
-        return false;
+    FrameDescEntry localFdeInfo;
+    const FrameDescEntry* fdePtr = cachedFde;
+    if (fdePtr == nullptr) {
+        if (!ParseFde((uintptr_t)uei.unwindInfo, (uintptr_t)uei.unwindInfo, localFdeInfo)) {
+            DFXLOGE("Failed to parse fde? addr: 0x%{public}" PRIx64 ", isLinear: %{public}d, isDebugFrame: %{public}d",
+                (uint64_t)(uintptr_t)uei.unwindInfo, (int)uti.isLinear, (int)uti.isDebugFrame);
+            lastErrorData_.SetAddrAndCode((uintptr_t)uei.unwindInfo, UNW_ERROR_DWARF_INVALID_FDE);
+            memory_ = originalMemory;
+            return false;
+        }
+        fdePtr = &localFdeInfo;
     }
+    const FrameDescEntry& fdeInfo = *fdePtr;
+
+    if (uti.isDebugFrame) {
+        pc = pc - uti.segbase;
+    }
+
     if (pc < fdeInfo.pcStart || pc >= fdeInfo.pcEnd) {
-        DFXLOGU("pc: %{public}p, FDE start: %{public}p, end: %{public}p",
-            (void*)pc, (void*)fdeInfo.pcStart, (void*)fdeInfo.pcEnd);
+        memory_ = originalMemory;
         return false;
     }
+
     DwarfCfaInstructions dwarfInstructions(memory_);
     if (!dwarfInstructions.Parse(pc, fdeInfo, *(rs.get()))) {
         DFXLOGE("Failed to parse dwarf instructions?");
         lastErrorData_.SetAddrAndCode(pc, UNW_ERROR_DWARF_INVALID_INSTR);
+        memory_ = originalMemory;
         return false;
     }
+
+    memory_ = originalMemory;
     return true;
 }
 
@@ -148,16 +280,19 @@ bool DwarfEntryParser::GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo)
     uintptr_t ptr = addr;
     bool isCieEntry = false;
     ParseCieOrFdeHeader(ptr, fdeInfo, isCieEntry);
+    uintptr_t entryEnd = isCieEntry ? fdeInfo.cie.instructionsEnd : fdeInfo.instructionsEnd;
 
     if (isCieEntry) {
         if (!ParseCie(addr, ptr, fdeInfo.cie)) {
             DFXLOGE("Failed to Parse CIE?");
+            addr = entryEnd;
             return false;
         }
         addr = fdeInfo.cie.instructionsEnd;
     } else {
         if (!ParseFde(addr, ptr, fdeInfo)) {
-            DFXLOGE("Failed to Parse FDE?");
+            DFXLOGE("Failed to Parse FDE? addr: 0x%{public}" PRIx64 "", (uint64_t)addr);
+            addr = entryEnd;
             return false;
         }
         addr = fdeInfo.instructionsEnd;
@@ -181,10 +316,12 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
         if (ciePtr == cie64Value_) {
             isCieEntry = true;
             fdeInfo.cie.instructionsEnd = instructionsEnd;
-            fdeInfo.cie.pointerEncoding = DW_EH_PE_sdata8;
+            fdeInfo.cie.pointerEncoding = isDebugFrame_
+                ? DW_EH_PE_absptr
+                : DW_EH_PE_sdata8;
         } else {
             fdeInfo.instructionsEnd = instructionsEnd;
-            fdeInfo.cieAddr = static_cast<uintptr_t>(ptr - ciePtr);
+            fdeInfo.cieAddr = isDebugFrame_ ? (entriesOffset_ + ciePtr) : static_cast<uintptr_t>(ptr - ciePtr);
         }
         ptr += sizeof(uint64_t);
     } else {
@@ -194,10 +331,12 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
         if (ciePtr == cie32Value_) {
             isCieEntry = true;
             fdeInfo.cie.instructionsEnd = instructionsEnd;
-            fdeInfo.cie.pointerEncoding = DW_EH_PE_sdata4;
+            fdeInfo.cie.pointerEncoding = isDebugFrame_
+                ? DW_EH_PE_absptr
+                : DW_EH_PE_sdata4;
         } else {
             fdeInfo.instructionsEnd = instructionsEnd;
-            fdeInfo.cieAddr = static_cast<uintptr_t>(ptr - ciePtr);
+            fdeInfo.cieAddr = isDebugFrame_ ? (entriesOffset_ + ciePtr) : static_cast<uintptr_t>(ptr - ciePtr);
         }
         ptr += sizeof(uint32_t);
     }
@@ -205,12 +344,20 @@ void DwarfEntryParser::ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeIn
 
 bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEntry& fdeInfo)
 {
-    DFXLOGU("fdeAddr: %{public}" PRIx64 "", (uint64_t)fdeAddr);
     if (!fdeEntries_.empty()) {
         auto iter = fdeEntries_.find(fdeAddr);
         if (iter != fdeEntries_.end()) {
             fdeInfo = iter->second;
             return true;
+        }
+    }
+    static std::mutex s_failMutex;
+    static std::unordered_map<uintptr_t, uintptr_t> s_failedFdes;
+    {
+        std::lock_guard<std::mutex> lock(s_failMutex);
+        auto it = s_failedFdes.find(fdeAddr);
+        if (it != s_failedFdes.end() && it->second == entriesOffset_) {
+            return false;
         }
     }
 
@@ -223,7 +370,13 @@ bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEn
         }
     }
     if (!FillInFde(fdePtr, fdeInfo)) {
-        DFXLOGE("ParseFde error, failed to fill FDE?");
+        DFXLOGE("ParseFde error, failed to fill FDE? fdeAddr: 0x%{public}" PRIx64 "", (uint64_t)fdeAddr);
+        {
+            std::lock_guard<std::mutex> lock(s_failMutex);
+            if (s_failedFdes.size() < 8192) { // 8192 : max failed fde cache
+                s_failedFdes[fdeAddr] = entriesOffset_;
+            }
+        }
         fdeEntries_.erase(fdeAddr);
         return false;
     }
@@ -234,7 +387,7 @@ bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEn
 bool DwarfEntryParser::FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo)
 {
     if (!ParseCie(fdeInfo.cieAddr, fdeInfo.cieAddr, fdeInfo.cie)) {
-        DFXLOGE("Failed to parse CIE?");
+        DFXLOGE("Failed to parse CIE? cieAddr: 0x%{public}" PRIx64 "", (uint64_t)fdeInfo.cieAddr);
         return false;
     }
 
@@ -290,7 +443,7 @@ bool DwarfEntryParser::ParseCie(uintptr_t cieAddr, uintptr_t ciePtr, CommonInfoE
         FrameDescEntry fdeInfo;
         ParseCieOrFdeHeader(ciePtr, fdeInfo, isCieEntry);
         if (!isCieEntry) {
-            DFXLOGE("ParseCie error, is not Cie Entry?");
+            DFXLOGE("ParseCie error, is not Cie Entry? cieAddr: 0x%{public}" PRIx64 "", (uint64_t)cieAddr);
             return false;
         }
         cieInfo = fdeInfo.cie;

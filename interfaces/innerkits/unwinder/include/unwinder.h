@@ -31,7 +31,7 @@ public:
     // for local
     Unwinder(bool needMaps = true);
     // for remote
-    Unwinder(int pid, bool crash = true, std::shared_ptr<DfxMaps> maps = nullptr);
+    Unwinder(int pid, bool crash = true, std::shared_ptr<DfxMaps> maps = nullptr, bool isContainer = false);
     Unwinder(int pid, int nspid, bool crash, std::shared_ptr<DfxMaps> maps = nullptr);
     // for customized
     Unwinder(std::shared_ptr<UnwindAccessors> accessors, bool local = false);
@@ -53,6 +53,7 @@ public:
 
     void SetRegs(std::shared_ptr<DfxRegs> regs);
     void SetMaps(std::shared_ptr<DfxMaps> maps);
+    void SetPid(pid_t pid);
     const std::shared_ptr<DfxRegs>& GetRegs() const;
 
     const std::shared_ptr<DfxMaps>& GetMaps() const;
@@ -90,6 +91,7 @@ public:
     bool GetFrameByPc(uintptr_t pc, std::shared_ptr<DfxMaps> maps, DfxFrame& frame);
     void GetFramesByPcs(std::vector<DfxFrame>& frames, std::vector<uintptr_t> pcs);
     void SetIsJitCrashFlag(bool isCrash);
+    void SetIsContainerPid(bool isContainerPid);
     int ArkWriteJitCodeToFile(int fd);
     const std::vector<uintptr_t>& GetJitCache(void);
     bool GetLockInfo(int32_t tid, char* buf, size_t sz);
@@ -98,6 +100,7 @@ public:
     static bool GetSymbolByPc(uintptr_t pc, std::shared_ptr<DfxMaps> maps,
         std::string& funcName, uint64_t& funcOffset);
     static void GetLocalFramesByPcs(std::vector<DfxFrame>& frames, std::vector<uintptr_t> pcs);
+    static std::string GetFramesStr(const std::vector<DfxFrame>& frames, bool isContainer);
     static std::string GetFramesStr(const std::vector<DfxFrame>& frames);
     static void FillLocalFrames(std::vector<DfxFrame>& frames);
 

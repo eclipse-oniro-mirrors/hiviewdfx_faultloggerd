@@ -33,6 +33,11 @@ namespace {
 
 std::string DfxFrameFormatter::GetFrameStr(const DfxFrame& frame)
 {
+    return GetFrameStr(frame, false);
+}
+
+std::string DfxFrameFormatter::GetFrameStr(const DfxFrame& frame, bool isContainer)
+{
     std::string data;
     if (frame.isJsFrame) {
 #if defined(ENABLE_MIXSTACK)
@@ -62,8 +67,14 @@ std::string DfxFrameFormatter::GetFrameStr(const DfxFrame& frame)
             if (!frame.originSoName.empty()) {
                 data += ":" + frame.originSoName;
             }
+        } else if (frame.map != nullptr && isContainer) {
+            data += StringPrintf(" <anonymous:%" PRIx64 ">", frame.map->begin);
         } else {
             data += " [Unknown]";
+        }
+        uint64_t elfOffset = (frame.map != nullptr) ? frame.map->elfOffset : 0;
+        if (elfOffset != 0 && isContainer) {
+            data += StringPrintf(" (offset 0x%" PRIx64 ")", elfOffset);
         }
         if (!frame.funcName.empty() &&
             frame.funcName.length() <= MAX_FUNC_NAME_LEN) {
@@ -86,9 +97,14 @@ std::string DfxFrameFormatter::GetFrameStr(const std::shared_ptr<DfxFrame>& fram
 
 std::string DfxFrameFormatter::GetFramesStr(const std::vector<DfxFrame>& frames)
 {
+    return GetFramesStr(frames, false);
+}
+
+std::string DfxFrameFormatter::GetFramesStr(const std::vector<DfxFrame>& frames, bool isContainer)
+{
     std::string ss;
     for (const auto& f : frames) {
-        ss += GetFrameStr(f);
+        ss += GetFrameStr(f, isContainer);
     }
     return ss;
 }

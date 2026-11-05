@@ -78,6 +78,24 @@ static const std::vector<uint16_t> QUT_REGS {
     REG_LR,
 };
 
+static const std::vector<uint16_t> QUT_ART_REGS {
+    REG_AARCH64_X0,
+    REG_AARCH64_X29,
+    REG_SP,
+    REG_PC,
+    REG_LR,
+    REG_AARCH64_X19,
+    REG_AARCH64_X20,
+    REG_AARCH64_X21,
+    REG_AARCH64_X22,
+    REG_AARCH64_X23,
+    REG_AARCH64_X24,
+    REG_AARCH64_X25,
+    REG_AARCH64_X26,
+    REG_AARCH64_X27,
+    REG_AARCH64_X28,
+};
+
 struct RegsUserArm64 {
     uint64_t regs[31]; // 31
     uint64_t sp;

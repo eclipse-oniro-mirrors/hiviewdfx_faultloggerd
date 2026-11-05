@@ -57,12 +57,18 @@ inline const std::string GetMapsFile(pid_t pid)
 
 std::shared_ptr<DfxMaps> DfxMaps::Create(pid_t pid, bool crash, bool formatPath)
 {
+    return Create(pid, crash, formatPath, false);
+}
+
+std::shared_ptr<DfxMaps> DfxMaps::Create(pid_t pid, bool crash, bool formatPath, bool isContainer)
+{
     std::string path = GetMapsFile(pid);
     if (path == "") {
         return nullptr;
     }
     auto dfxMaps = std::make_shared<DfxMaps>();
     dfxMaps->isFormatPath_ = formatPath;
+    dfxMaps->isContainer_ = isContainer;
     if (!crash) {
         DFXLOGU("Create maps(%{public}s) with not crash, will only parse exec map", path.c_str());
         dfxMaps->EnableOnlyExec(true);
@@ -104,6 +110,7 @@ bool DfxMaps::Create(const pid_t pid, std::vector<std::shared_ptr<DfxMap>>& maps
     }
     auto dfxMaps = std::make_shared<DfxMaps>();
     dfxMaps->EnableMapIndex(true);
+    dfxMaps->isFormatPath_ = false;
     if (!dfxMaps->Parse(pid, path)) {
         return false;
     }
@@ -127,7 +134,7 @@ void DfxMaps::ParseMaps(const pid_t pid, FILE* fp, int& fgetCount)
             continue;
         }
         if (isFormatPath_) {
-            DfxMap::FormatMapName(pid, map->name);
+            DfxMap::FormatMapName(pid, map->name, isContainer_);
         }
         bool isExec = map->IsMapExec();
         /* The adlt so is composed of multiple so files, therefore there are multiple text sections.
@@ -303,6 +310,9 @@ bool DfxMaps::IsLegalMapItem(const std::string& name, bool withArk)
 {
     // some special
     if (withArk && (IsArkHapMapItem(name) || IsArkCodeMapItem(name))) {
+        return true;
+    }
+    if (name.find("/memfd:") != std::string::npos) {
         return true;
     }
     if (EndsWith(name, "[vdso]") || EndsWith(name, "[shmm]")) {

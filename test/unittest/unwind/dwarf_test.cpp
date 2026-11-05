@@ -34,14 +34,20 @@
 #include "string_ex.h"
 
 #include "dfx_define.h"
+#define private public
 #include "dfx_instructions.h"
+#undef private
 #include "dfx_log.h"
 #include "dfx_memory.h"
 #include "dfx_regs.h"
+#define private public
 #include "dwarf_cfa_instructions.h"
+#undef private
 #include "dwarf_define.h"
 #include "dwarf_op.h"
+#define private public
 #include "dwarf_entry_parser.h"
+#undef private
 #include "elf_factory.h"
 #include "thread_context.h"
 #include "unwind_arm64_define.h"
@@ -1158,7 +1164,8 @@ HWTEST_F(DwarfTest, DwarfTest014, TestSize.Level2)
     auto unwindEntryParser = std::make_shared<DwarfEntryParser>(memory);
     UnwindTableInfo uti;
     UnwindEntryInfo uei;
-    bool ret = unwindEntryParser->LinearSearchEntry(0, uti, uei);
+    const FrameDescEntry* cachedFde = nullptr;
+    bool ret = unwindEntryParser->LinearSearchEntry(0, uti, uei, &cachedFde);
     ASSERT_FALSE(ret);
     FrameDescEntry fdeInfo;
     uintptr_t addr = 0;
@@ -1179,26 +1186,27 @@ HWTEST_F(DwarfTest, DfxInstructionsTest001, TestSize.Level2)
     RegLoc loc;
     auto memory = std::make_shared<DfxMemory>();
     uintptr_t val;
+    bool isDexPc = false;
     loc.type = REG_LOC_VAL_OFFSET;
-    bool ret = instructions->Flush(*(regs.get()), memory, 0, loc, val);
+    bool ret = instructions->Flush(*(regs.get()), memory, 0, loc, val, isDexPc);
     ASSERT_EQ(ret, true);
     loc.type = REG_LOC_VAL_OFFSET;
-    ret = instructions->Flush(*(regs.get()), nullptr, 0, loc, val);
+    ret = instructions->Flush(*(regs.get()), nullptr, 0, loc, val, isDexPc);
     ASSERT_EQ(ret, false);
     loc.type = REG_LOC_MEM_OFFSET;
-    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val);
+    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val, isDexPc);
     ASSERT_EQ(ret, true);
     loc.type = REG_LOC_REGISTER;
-    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val);
+    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val, isDexPc);
     ASSERT_EQ(ret, true);
     loc.type = REG_LOC_MEM_EXPRESSION;
-    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val);
+    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val, isDexPc);
     ASSERT_EQ(ret, true);
     loc.type = REG_LOC_VAL_EXPRESSION;
-    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val);
+    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val, isDexPc);
     ASSERT_EQ(ret, true);
     loc.type = REG_LOC_UNUSED;
-    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val);
+    ret = instructions->Flush(*(regs.get()), memory, 0, loc, val, isDexPc);
     ASSERT_EQ(ret, false);
     GTEST_LOG_(INFO) << "DfxInstructionsTest001: end.\n";
 }

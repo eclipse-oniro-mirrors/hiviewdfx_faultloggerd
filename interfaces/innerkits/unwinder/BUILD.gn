@@ -18,6 +18,7 @@ dfx_unwinder_sources = [
   "src/ark/dfx_hap.cpp",
   "src/elf/dfx_elf.cpp",
   "src/elf/dfx_elf_parser.cpp",
+  "src/elf/dfx_jit_debug.cpp",
   "src/elf/dfx_mmap.cpp",
   "src/elf/dfx_symbols.cpp",
   "src/elf/elf_factory.cpp",

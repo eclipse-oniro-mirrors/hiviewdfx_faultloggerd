@@ -38,6 +38,7 @@ public:
     ~DfxElf() { Clear(); }
 
     void SetMmap(const std::shared_ptr<DfxMmap>& mmap) { mmap_ = mmap; }
+    std::shared_ptr<DfxMmap> GetMmap() { return mmap_; }
     bool IsValid();
     uint8_t GetClassType();
     ArchType GetArchType();
@@ -55,6 +56,15 @@ public:
     uint64_t GetEndPc();
     uint64_t GetStartVaddr();
     uint64_t GetEndVaddr();
+    bool IsValidPc(uint64_t pc);
+    void SetRuntimeRange(uint64_t start, uint64_t end)
+    {
+        runtimeStart_ = start;
+        runtimeEnd_ = end;
+    }
+    uint64_t GetRuntimeStart() const { return runtimeStart_; }
+    uint64_t GetRuntimeEnd() const { return runtimeEnd_; }
+    bool HasRuntimeRange() const { return runtimeStart_ != static_cast<uint64_t>(-1) && runtimeEnd_ != 0; }
     void SetBaseOffset(uint64_t offset);
     uint64_t GetBaseOffset();
     uint64_t GetStartOffset();
@@ -74,6 +84,7 @@ public:
     const std::string& GetAdltStrtab() const;
     std::string GetAdltOriginSoNameByRelPc(uint64_t relPc) const;
     bool FindFuncSymbolByName(std::string funcName, ElfSymbol& elfSymbol);
+    bool FindGlobalVariableByName(const std::string& name, ElfSymbol& elfSymbol);
 
 protected:
     void Init();
@@ -93,6 +104,11 @@ protected:
     static bool IsValidSectionOffset(const ShdrInfo& shdr, uint64_t mmapSize, uint64_t minSize);
     bool FillUnwindTableByEhFrame(ShdrInfo& shdr, uintptr_t loadBase, const std::string& mapName,
         struct UnwindTableInfo& uti);
+    struct DwarfEhFrameHdr* GetEhFrameHdr(const ShdrInfo& shdr, uint64_t mmapSize);
+    struct DwarfEhFrameHdr* SynthEhFrameHdr(struct DwarfEhFrameHdr& synthHdr, const ShdrInfo& shdr,
+        uint64_t mmapSize, const std::string& mapName);
+    static bool FillUnwindTableByDebugFrame(const ShdrInfo& shdr, uintptr_t loadBase,
+        const std::shared_ptr<DfxMmap>& debugFrameMmap, struct UnwindTableInfo& uti);
     static bool FillUnwindTableByExidx(ShdrInfo shdr, uintptr_t loadBase, struct UnwindTableInfo* uti);
     bool FindFuncSymbol(uint64_t addr, const std::set<ElfSymbol>& symbols, ElfSymbol& elfSymbol);
     bool IsValidElf(const void* ptr, size_t size);
@@ -106,6 +122,8 @@ private:
     uint64_t startPc_ = static_cast<uint64_t>(-1);
     uint64_t endPc_ = 0;
     uint64_t baseOffset_ = 0; // use for so in hap
+    uint64_t runtimeStart_ = static_cast<uint64_t>(-1);
+    uint64_t runtimeEnd_ = 0;
     std::string buildId_ = "";
     struct UnwindTableInfo uti_;
     bool hasTableInfo_ = false;

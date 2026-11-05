@@ -66,8 +66,21 @@ public:
     std::string GetSpecialRegsName(uintptr_t val) const;
     std::string GetSpecialRegsNameByIndex(int index) const;
     std::string PrintSpecialRegs() const;
+
+    uintptr_t DexPc() const { return dexPc_; }
+    void SetDexPc(uintptr_t pc) { dexPc_ = pc; }
+    bool DexPcSeen() const { return dexPcSeen_; }
+    void SetDexPcSeen(bool seen) { dexPcSeen_ = seen; }
+    void ClearDexPc()
+    {
+        dexPc_ = 0;
+        dexPcSeen_ = false;
+    }
+
 protected:
     std::vector<uintptr_t> regsData_ {};
+    uintptr_t dexPc_ = 0;
+    bool dexPcSeen_ = false;
 };
 
 #if defined(__arm__)

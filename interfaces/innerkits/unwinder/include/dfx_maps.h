@@ -33,6 +33,7 @@ public:
 
     static std::shared_ptr<DfxMaps> CreateByBuffer(const std::string& bundleName, std::string& buffer);
     static std::shared_ptr<DfxMaps> Create(pid_t pid = 0, bool crash = true, bool formatPath = true);
+    static std::shared_ptr<DfxMaps> Create(pid_t pid, bool crash, bool formatPath, bool isContainer);
     static std::shared_ptr<DfxMaps> Create(pid_t pid, const std::string& path);
     static bool Create(const pid_t pid, std::vector<std::shared_ptr<DfxMap>>& maps, std::vector<int>& mapIndex);
 
@@ -81,6 +82,7 @@ private:
     uintptr_t StaticArkEnd_ = 0;
     uint32_t adltMapIndex_ = -1;
     bool isFormatPath_ {true};
+    bool isContainer_ {false};
 };
 } // namespace HiviewDFX
 } // namespace OHOS

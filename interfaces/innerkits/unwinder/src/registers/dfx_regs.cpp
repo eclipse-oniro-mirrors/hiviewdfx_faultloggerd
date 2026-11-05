@@ -33,6 +33,7 @@ namespace {
 #define LOG_TAG "DfxRegs"
 }
 std::vector<uint16_t> DfxRegsQut::qutRegs_ = {};
+bool DfxRegsQut::qutRegsLocked_ = false;
 
 std::shared_ptr<DfxRegs> DfxRegs::Create()
 {

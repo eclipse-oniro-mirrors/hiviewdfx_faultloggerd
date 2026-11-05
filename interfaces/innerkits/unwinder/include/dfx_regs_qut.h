@@ -26,6 +26,16 @@ public:
     static inline void SetQutRegs(const std::vector<uint16_t>& qutRegs)
     {
         qutRegs_ = qutRegs;
+        qutRegsLocked_ = true;
+    }
+
+    static inline bool SetQutRegsAuto(const std::vector<uint16_t>& qutRegs)
+    {
+        if (qutRegsLocked_ || qutRegs_ == qutRegs) {
+            return false;
+        }
+        qutRegs_ = qutRegs;
+        return true;
     }
 
     static inline const std::vector<uint16_t>& GetQutRegs()
@@ -55,6 +65,7 @@ public:
 
 protected:
     static std::vector<uint16_t> qutRegs_;
+    static bool qutRegsLocked_;
 };
 } // namespace HiviewDFX
 } // namespace OHOS
