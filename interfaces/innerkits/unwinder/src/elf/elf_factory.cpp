@@ -86,6 +86,10 @@ static void XzFree(ISzAllocPtr, void *address)
 
 bool MiniDebugInfoFactory::XzDecompress(const uint8_t *src, size_t srcLen, std::vector<uint8_t>& out)
 {
+    if (src == nullptr || srcLen == 0) {
+        DFXLOGU("invalid .gnu_debugdata input, src is null or empty");
+        return false;
+    }
     DFX_TRACE_SCOPED_DLSYM("XzDecompress");
     ISzAlloc alloc;
     CXzUnpacker state;

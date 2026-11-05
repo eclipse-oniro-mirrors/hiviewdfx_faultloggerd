@@ -88,6 +88,9 @@ protected:
     template <typename EhdrType, typename ShdrType>
     bool ExtractSectionHeadersInfo(const EhdrType& ehdr, ShdrType& shdr);
     template <typename EhdrType, typename ShdrType>
+    void ExtractShdrInfo(const EhdrType& ehdr, const ShdrType& shdr, size_t index);
+    void GetGnuDebugDataSectionInfo(uint64_t shOffset, uint64_t shSize);
+    template <typename EhdrType, typename ShdrType>
     bool ParseSectionHeaders(const EhdrType& ehdr);
     template <typename SymType>
     bool IsFunc(const SymType sym);
