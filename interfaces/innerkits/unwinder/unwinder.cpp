@@ -53,16 +53,22 @@ const size_t X86_FP_SP_OFFSET = 16;
 namespace {
 class StackCheckGuard {
 public:
-    explicit StackCheckGuard(UnwindContext& ctx) : ctx_(ctx), prev_(ctx.stackCheck)
+    explicit StackCheckGuard(UnwindContext& ctx, bool forceSet = true)
+        : ctx_(ctx), forceSet_(forceSet), prev_(ctx.stackCheck)
     {
-        ctx_.stackCheck = true;
+        if (forceSet_) {
+            ctx_.stackCheck = true;
+        }
     }
     ~StackCheckGuard()
     {
-        ctx_.stackCheck = prev_;
+        if (forceSet_) {
+            ctx_.stackCheck = prev_;
+        }
     }
 private:
     UnwindContext& ctx_;
+    bool forceSet_ {true};
     bool prev_ {false};
 };
 }
@@ -820,7 +826,8 @@ bool Unwinder::Impl::StepV8Frame(StepFrame& frame, const std::shared_ptr<DfxMap>
         ", frameType: "+ std::to_string(static_cast<uint8_t>(frame.frameType));
     ElapsedTime counter(timeLimitCheck, 20); // 20 : limit cost time 20 ms
     JsvmStepParam jsvmParam(&frame.fp, &frame.sp, &frame.pc, &frame.isJsFrame);
-    StackCheckGuard guard(context_);
+    bool isLocalUnwind = (pid_ == UNWIND_TYPE_LOCAL) || (pid_ == UNWIND_TYPE_CUSTOMIZE_LOCAL);
+    StackCheckGuard guard(context_, isLocalUnwind);
     if (DfxJsvm::Instance().StepJsvmFrame(memory_.get(), &(Unwinder::AccessMem), &jsvmParam) < 0) {
         DFXLOGE("Failed to step jsvm frame");
         return false;
@@ -917,7 +924,8 @@ int Unwinder::Impl::UnwindArkFrameByFp(StepFrame& frame, const ArkMapRange& arkM
         frame.frameType = FrameType::STATIC_JS_FRAME;
         frameIndex = 0;
     }
-    StackCheckGuard guard(context_);
+    bool isLocalUnwind = (pid_ == UNWIND_TYPE_LOCAL) || (pid_ == UNWIND_TYPE_CUSTOMIZE_LOCAL);
+    StackCheckGuard guard(context_, isLocalUnwind);
     if (!StepArkJsFrame(frame, frameIndex)) {
         DFXLOGE("Failed to step ark Js frame, pc: %{private}p", reinterpret_cast<void *>(frame.pc));
         lastErrorData_.SetAddrAndCode(frame.pc, UNW_ERROR_STEP_ARK_FRAME);
