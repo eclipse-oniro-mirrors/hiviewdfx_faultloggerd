@@ -790,6 +790,81 @@ HWTEST_F(FaultloggerdClientTest, TempFileManagerCreateFileDescriptorFilePathTest
 }
 
 /**
+ * @tc.name: RequestBinderPidsDumpTest001
+ * @tc.desc: test RequestBinderPidsDump end-to-end with count 0 (no binder pids).
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestBinderPidsDumpTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest001: start.";
+    int fd = -1;
+    int32_t ret = RequestBinderPidsDump(getpid(), nullptr, nullptr, 0, &fd);
+    ASSERT_EQ(ret, ResponseCode::REQUEST_SUCCESS);
+    ASSERT_GE(fd, 0);
+    SmartFd smartFd(fd);
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest001: end.";
+}
+
+/**
+ * @tc.name: RequestBinderPidsDumpTest002
+ * @tc.desc: test RequestBinderPidsDump with invalid pid (<= 0).
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestBinderPidsDumpTest002, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest002: start.";
+    int fd = -1;
+    EXPECT_EQ(RequestBinderPidsDump(0, nullptr, nullptr, 0, &fd),
+        ResponseCode::DEFAULT_ERROR_CODE);
+    EXPECT_EQ(RequestBinderPidsDump(-1, nullptr, nullptr, 0, &fd),
+        ResponseCode::DEFAULT_ERROR_CODE);
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest002: end.";
+}
+
+/**
+ * @tc.name: RequestBinderPidsDumpTest003
+ * @tc.desc: test RequestBinderPidsDump with null fd pointer.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestBinderPidsDumpTest003, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest003: start.";
+    EXPECT_EQ(RequestBinderPidsDump(getpid(), nullptr, nullptr, 0, nullptr),
+        ResponseCode::DEFAULT_ERROR_CODE);
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest003: end.";
+}
+
+/**
+ * @tc.name: RequestBinderPidsDumpTest004
+ * @tc.desc: test RequestBinderPidsDump with count > 0 but null binderPids array.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestBinderPidsDumpTest004, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest004: start.";
+    int fd = -1;
+    int32_t nsPids[] = { NONEXISTENT_TEST_PID };
+    EXPECT_EQ(RequestBinderPidsDump(getpid(), nullptr, nsPids, 1, &fd),
+        ResponseCode::DEFAULT_ERROR_CODE);
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest004: end.";
+}
+
+/**
+ * @tc.name: RequestBinderPidsDumpTest005
+ * @tc.desc: test RequestBinderPidsDump with count > 0 but null nsBinderPids array.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FaultloggerdClientTest, RequestBinderPidsDumpTest005, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest005: start.";
+    int fd = -1;
+    int32_t binderPids[] = { NONEXISTENT_TEST_PID };
+    EXPECT_EQ(RequestBinderPidsDump(getpid(), binderPids, nullptr, 1, &fd),
+        ResponseCode::DEFAULT_ERROR_CODE);
+    GTEST_LOG_(INFO) << "RequestBinderPidsDumpTest005: end.";
+}
+
+/**
  * @tc.name: RequestProcStatusInfoTest001
  * @tc.desc: test RequestProcStatusInfo end-to-end with current process.
  * @tc.type: FUNC
