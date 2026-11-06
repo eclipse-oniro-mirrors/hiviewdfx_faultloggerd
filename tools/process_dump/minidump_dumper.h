@@ -59,6 +59,8 @@ private:
     void PrintMaps();
     void PrintOpenFiles();
     void Report();
+    void ReportCrashNoLog(const std::string& summary);
+    bool IsCrashSignal(int signo);
     DfxProcess process_;
     ProcessDumpRequest request_ {};
     SmartFd outputFdGuard_;
