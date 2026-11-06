@@ -47,6 +47,10 @@
 namespace OHOS {
 namespace HiviewDFX {
 constexpr size_t BUFFER_SIZE = 4096;
+constexpr int CRASH_SIGNAL_LIST[] = {
+    SIGILL, SIGABRT, SIGBUS, SIGFPE,
+    SIGSEGV, SIGSTKFLT, SIGSYS, SIGTRAP
+};
 
 bool MinidumpDumper::Dump(int pid, int pipeFd, bool enableMinidump, bool enableMinidumpToCrashLog)
 {
@@ -63,14 +67,12 @@ bool MinidumpDumper::Dump(int pid, int pipeFd, bool enableMinidump, bool enableM
             DFXLOGE("Failed to init buffer writer.");
         }
         if (!ParseMinidump()) {
-            int ret = HiSysEventWrite(HiSysEvent::Domain::RELIABILITY, "CPP_CRASH_NO_LOG",
-                HiSysEvent::EventType::FAULT,
-                "UID", request_.uid,
-                "PID", request_.pid,
-                "PROCESS_NAME", request_.processName,
-                "HAPPEN_TIME", request_.timeStamp,
-                "SUMMARY", "Failed to parse minidump file!");
-            DFXLOGI("Report pid %{public}d parse minidump failed event ret %{public}d", request_.pid, ret);
+            ReportCrashNoLog("Failed to parse minidump file!");
+            return false;
+        }
+        if (!IsCrashSignal(request_.siginfo.si_signo)) {
+            std::string summary = "invalid core signal:" + std::to_string(request_.siginfo.si_signo);
+            ReportCrashNoLog(summary);
             return false;
         }
         UnwindProcess();
@@ -212,9 +214,10 @@ bool MinidumpDumper::BuildSignalInfoFromException(MinidumpException* exception)
         return false;
     }
     siginfo_t sigInfo{};
-    sigInfo.si_signo = exceptionRecord->exceptionCode,
-    sigInfo.si_code = exceptionRecord->exceptionFlags,
-    sigInfo.si_addr = reinterpret_cast<void*>(exceptionRecord->exceptionAddress),
+    sigInfo.si_signo = exceptionRecord->exceptionCode;
+    sigInfo.si_code = exceptionRecord->exceptionFlags;
+    sigInfo.si_addr = reinterpret_cast<void*>(exceptionRecord->exceptionAddress);
+    request_.siginfo = sigInfo;
     process_.SetReason(DfxSignal::PrintSignal(sigInfo));
     return true;
 }
@@ -729,6 +732,24 @@ void MinidumpDumper::Report()
 {
     SysEventReporter reporter(request_.type);
     reporter.Report(process_, request_);
+}
+
+void MinidumpDumper::ReportCrashNoLog(const std::string& summary)
+{
+    int ret = HiSysEventWrite(HiSysEvent::Domain::RELIABILITY, "CPP_CRASH_NO_LOG",
+        HiSysEvent::EventType::FAULT,
+        "UID", request_.uid,
+        "PID", request_.pid,
+        "PROCESS_NAME", request_.processName,
+        "HAPPEN_TIME", request_.timeStamp,
+        "SUMMARY", summary);
+    DFXLOGI("Report pid %{public}d cpp crash no log event ret %{public}d", request_.pid, ret);
+}
+
+bool MinidumpDumper::IsCrashSignal(int signo)
+{
+    size_t count = sizeof(CRASH_SIGNAL_LIST) / sizeof(CRASH_SIGNAL_LIST[0]);
+    return std::find(CRASH_SIGNAL_LIST, CRASH_SIGNAL_LIST + count, signo) != CRASH_SIGNAL_LIST + count;
 }
 } // namespace HiviewDFX
 } // namespace OHOS
