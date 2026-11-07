@@ -35,7 +35,6 @@ size_t StitchAsyncStacksSignalSafe(void** frames, size_t capacity, size_t numFra
 namespace OHOS {
 namespace HiviewDFX {
 namespace {
-constexpr size_t LINK_LAYER_MARKER = 0xFFFFFFFF;
 constexpr uint32_t TABLE_NODE_CNT = 512;
 constexpr uintptr_t PC_TAIL = 0xAAA;
 constexpr uintptr_t PC_HEAD = 0xBBB;
