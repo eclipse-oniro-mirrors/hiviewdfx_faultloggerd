@@ -40,6 +40,7 @@ if (defined(ohos_lite)) {
 
     sources = [
       "async_stack.cpp",
+      "async_stack_signal_safe.cpp",
       "unique_stack_table.cpp",
       "async_context_manager.cpp",
     ]

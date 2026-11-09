@@ -26,7 +26,9 @@ ohos_unittest("async_stack_test") {
   ]
   sources = [
     "$faultloggerd_interfaces_path/innerkits/async_stack/unique_stack_table.cpp",
+    "$faultloggerd_interfaces_path/innerkits/async_stack/async_stack_signal_safe.cpp",
     "async_stack_test.cpp",
+    "async_stack_signal_safe_test.cpp",
     "stack_table_test.cpp",
   ]
   cflags_cc = [ "-Dprivate=public" ]

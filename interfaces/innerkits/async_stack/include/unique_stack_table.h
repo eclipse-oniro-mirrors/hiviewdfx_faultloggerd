@@ -127,6 +127,7 @@ public:
     uint64_t PutPcsInTable(StackId *stackId, const uintptr_t *pcs, size_t nr);
     bool GetPcsByStackId(const StackId stackId, std::vector<uintptr_t>& pcs);
     bool GetPcsByStackId(StackId stackId, std::vector<uintptr_t>& pcs, bool isProfiler);
+    bool GetPcsByStackIdSignalSafe(StackId stackId, void** buffer, size_t bufferSize);
     bool ImportNode(uint32_t index, const Node& node);
     size_t GetWriteSize();
 
