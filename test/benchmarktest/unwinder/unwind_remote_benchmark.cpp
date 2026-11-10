@@ -192,6 +192,18 @@ static void BenchmarkUnwinderRemoteQut(benchmark::State& state)
 }
 BENCHMARK(BenchmarkUnwinderRemoteQut);
 
+#if defined(__aarch64__)
+static void BenchmarkUnwinderRemoteQutArt(benchmark::State& state)
+{
+    DfxRegsQut::SetQutRegs(QUT_ART_REGS);
+    UnwindData data;
+    data.isCache = false;
+    data.isFillFrames = false;
+    Run(state, &data);
+}
+BENCHMARK(BenchmarkUnwinderRemoteQutArt);
+#endif
+
 /**
 * @tc.name: BenchmarkUnwinderRemoteQutCache
 * @tc.desc: Unwind remote qut cache

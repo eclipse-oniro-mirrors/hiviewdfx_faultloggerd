@@ -305,7 +305,7 @@ bool DfxMap::IsArkWebJsExecutable()
 
 bool DfxMap::IsVdsoMap()
 {
-    if ((name == "[shmm]" || name == "[vdso]") && IsMapExec()) {
+    if (IsMapExec() && (EndsWith(name, "[shmm]") || EndsWith(name, "[vdso]"))) {
         return true;
     }
     return false;
@@ -383,6 +383,9 @@ const std::shared_ptr<DfxElf> DfxMap::GetElf(pid_t pid)
         if (elf != nullptr && elf->IsAdlt()) {
             elf->SetLoadBase(GetAdltLoadBase());
         }
+        if (elf != nullptr) {
+            elfOffset = elf->GetBaseOffset();
+        }
         DFXLOGU("GetElf name: %{public}s", name.c_str());
     }
     return elf;
@@ -398,8 +401,11 @@ std::string DfxMap::GetElfName()
         return name;
     }
     std::string soName = name;
-    if (EndsWith(name, ".hap")) {
-        soName.append("!" + elf->GetElfName());
+    if (EndsWith(name, ".hap") || EndsWith(name, ".apk")) {
+        std::string inner = elf->GetElfName();
+        if (!inner.empty()) {
+            soName.append("!" + inner);
+        }
     }
     return soName;
 }
@@ -423,12 +429,19 @@ void DfxMap::FormatMapName(const std::string& bundleName, std::string& mapName, 
     }
 }
 
-void DfxMap::FormatMapName(pid_t pid, std::string& mapName)
+void DfxMap::FormatMapName(pid_t pid, std::string& mapName, bool isContainer)
 {
     if (pid <= 0 || pid == getpid()) {
         return;
     }
 
+    if (mapName.empty() || mapName[0] != '/' || StartsWith(mapName, "/proc/")) {
+        return;
+    }
+    if (isContainer) {
+        mapName = "/proc/" + std::to_string(pid) + "/root" + mapName;
+        return;
+    }
     // format sandbox file path, add '/proc/xxx/root' prefix
     if (StartsWith(mapName, SANDBOX_FILE_PATH_PREFIX)) {
         mapName = "/proc/" + std::to_string(pid) + "/root" + mapName;
@@ -437,11 +450,10 @@ void DfxMap::FormatMapName(pid_t pid, std::string& mapName)
 
 std::string DfxMap::UnFormatMapName(const std::string& mapName)
 {
-    // unformat sandbox file path, drop '/proc/xxx/root' prefix
     if (StartsWith(mapName, "/proc/")) {
-        auto startPos = mapName.find(SANDBOX_FILE_PATH_PREFIX);
-        if (startPos != std::string::npos) {
-            return mapName.substr(startPos);
+        auto rootPos = mapName.find("/root");
+        if (rootPos != std::string::npos) {
+            return mapName.substr(rootPos + static_cast<size_t>(sizeof("/root")) - 1);
         }
     }
     return mapName;

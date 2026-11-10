@@ -225,6 +225,31 @@ uint64_t DfxElf::GetEndVaddr()
     return 0;
 }
 
+bool DfxElf::IsValidPc(uint64_t pc)
+{
+    if (!IsValid()) {
+        return false;
+    }
+    if (HasRuntimeRange()) {
+        return pc >= runtimeStart_ && pc < runtimeEnd_;
+    }
+    uint64_t loadBase = (loadBase_ != static_cast<uint64_t>(-1)) ? loadBase_ : 0;
+    const auto& ptLoads = elfParse_->GetPtLoads();
+    if (!ptLoads.empty()) {
+        for (const auto& entry : ptLoads) {
+            uint64_t start = entry.second.tableVaddr + loadBase;
+            uint64_t end = start + entry.second.tableSize;
+            if (pc >= start && pc < end) {
+                return true;
+            }
+        }
+        return false;
+    }
+    uint64_t startVaddr = GetStartVaddr() + loadBase;
+    uint64_t endVaddr = GetEndVaddr() + loadBase;
+    return (pc >= startVaddr && pc < endVaddr);
+}
+
 uint64_t DfxElf::GetStartOffset()
 {
     if (IsValid()) {
@@ -274,7 +299,6 @@ std::string DfxElf::GetBuildId()
     }
     return buildId_;
 }
-
 
 uintptr_t DfxElf::GetGlobalPointer()
 {
@@ -402,6 +426,14 @@ bool DfxElf::FindFuncSymbolByName(std::string funcName, ElfSymbol& elfSymbol)
         }
     }
     return false;
+}
+
+bool DfxElf::FindGlobalVariableByName(const std::string& name, ElfSymbol& elfSymbol)
+{
+    if (elfParse_ == nullptr) {
+        return false;
+    }
+    return elfParse_->FindSymbolByName<Elf64_Sym>(name, elfSymbol);
 }
 
 bool DfxElf::FindFuncSymbol(uint64_t addr, const std::set<ElfSymbol>& symbols, ElfSymbol& elfSymbol)
@@ -564,40 +596,71 @@ bool DfxElf::IsValidSectionOffset(const ShdrInfo& shdr, uint64_t mmapSize, uint6
     return true;
 }
 
-bool DfxElf::FillUnwindTableByEhFrame(ShdrInfo& shdr, uintptr_t loadBase, const std::string& mapName,
-    struct UnwindTableInfo& uti)
+struct DwarfEhFrameHdr* DfxElf::GetEhFrameHdr(const ShdrInfo& shdr, uint64_t mmapSize)
 {
-    struct DwarfEhFrameHdr* hdr = nullptr;
+    if (!IsValidSectionOffset(shdr, mmapSize, sizeof(struct DwarfEhFrameHdr))) {
+        DFXLOGE("[%{public}d]: Invalid .eh_frame_hdr section, offset: 0x%{public}" PRIx64
+            ", size: 0x%{public}" PRIx64 ", mmapSize: %{public}" PRIu64, __LINE__,
+            shdr.offset, shdr.size, mmapSize);
+        return nullptr;
+    }
+    INSTR_STATISTIC(InstructionEntriesEhFrame, shdr.size, 0);
+    return (struct DwarfEhFrameHdr *) (shdr.offset + (char *)GetMmapPtr());
+}
+
+struct DwarfEhFrameHdr* DfxElf::SynthEhFrameHdr(struct DwarfEhFrameHdr& synthHdr,
+    const ShdrInfo& shdr, uint64_t mmapSize, const std::string& mapName)
+{
+    if (!IsValidSectionOffset(shdr, mmapSize, 0)) {
+        DFXLOGE("[%{public}d]: Invalid .eh_frame section, offset: 0x%{public}" PRIx64
+            ", size: 0x%{public}" PRIx64 ", mmapSize: %{public}" PRIu64, __LINE__,
+            shdr.offset, shdr.size, mmapSize);
+        return nullptr;
+    }
+    DFXLOGW("[%{public}d]: Elf(%{public}s) no found .eh_frame_hdr section, " \
+        "using synthetic .eh_frame section", __LINE__, mapName.c_str());
+    INSTR_STATISTIC(InstructionEntriesEhFrame, shdr.size, 0);
+    synthHdr.version = DW_EH_VERSION;
+    synthHdr.ehFramePtrEnc = DW_EH_PE_absptr |
+        ((sizeof(ElfW(Addr)) == 4) ? DW_EH_PE_udata4 : DW_EH_PE_udata8); // 4 : 32-bit address, 8 : 64-bit address
+    synthHdr.fdeCountEnc = DW_EH_PE_omit;
+    synthHdr.tableEnc = DW_EH_PE_omit;
+    synthHdr.ehFrame = (ElfW(Addr))(shdr.offset + (char*)GetMmapPtr());
+    return &synthHdr;
+}
+
+bool DfxElf::FillUnwindTableByDebugFrame(const ShdrInfo& shdr, uintptr_t loadBase,
+    const std::shared_ptr<DfxMmap>& debugFrameMmap, struct UnwindTableInfo& uti)
+{
+    INSTR_STATISTIC(InstructionEntriesDebugFrame, shdr.size, 0);
+    uti.isLinear = true;
+    uti.tableLen = ~0UL;
+    uti.tableData = shdr.offset;
+    uti.segbase = loadBase;
+    uti.format = UNW_INFO_FORMAT_REMOTE_TABLE;
+    uti.isDebugFrame = true;
+    uti.debugFrameMmap = debugFrameMmap;
+    uti.debugFrameEnd = shdr.offset + shdr.size;
+    return true;
+}
+
+bool DfxElf::FillUnwindTableByEhFrame(ShdrInfo& shdr, uintptr_t loadBase,
+    const std::string& mapName, struct UnwindTableInfo& uti)
+{
     struct DwarfEhFrameHdr synthHdr;
+    struct DwarfEhFrameHdr* hdr = nullptr;
     uint64_t mmapSize = GetMmapSize();
     if (GetSectionInfo(shdr, EH_FRAME_HDR) && GetMmapPtr() != nullptr) {
-        if (!IsValidSectionOffset(shdr, mmapSize, sizeof(struct DwarfEhFrameHdr))) {
-            DFXLOGE("[%{public}d]: Invalid .eh_frame_hdr section, offset: 0x%{public}" PRIx64
-                ", size: 0x%{public}" PRIx64 ", mmapSize: %{public}" PRIu64, __LINE__,
-                shdr.offset, shdr.size, mmapSize);
-            return false;
-        } else {
-            INSTR_STATISTIC(InstructionEntriesEhFrame, shdr.size, 0);
-            hdr = (struct DwarfEhFrameHdr *)(shdr.offset + (char *)GetMmapPtr());
-        }
+        hdr = GetEhFrameHdr(shdr, mmapSize);
     } else if (GetSectionInfo(shdr, EH_FRAME) && GetMmapPtr() != nullptr) {
-        if (!IsValidSectionOffset(shdr, mmapSize, 0)) {
-            DFXLOGE("[%{public}d]: Invalid .eh_frame section, offset: 0x%{public}" PRIx64
-                ", size: 0x%{public}" PRIx64 ", mmapSize: %{public}" PRIu64, __LINE__,
-                shdr.offset, shdr.size, mmapSize);
-            return false;
-        } else {
-            DFXLOGW("[%{public}d]: Elf(%{public}s) no found .eh_frame_hdr section, " \
-                "using synthetic .eh_frame section", __LINE__, mapName.c_str());
-            INSTR_STATISTIC(InstructionEntriesEhFrame, shdr.size, 0);
-            synthHdr.version = DW_EH_VERSION;
-            synthHdr.ehFramePtrEnc = DW_EH_PE_absptr |
-                ((sizeof(ElfW(Addr)) == 4) ? DW_EH_PE_udata4 : DW_EH_PE_udata8); // 4 : four bytes
-            synthHdr.fdeCountEnc = DW_EH_PE_omit;
-            synthHdr.tableEnc = DW_EH_PE_omit;
-            synthHdr.ehFrame = (ElfW(Addr))(shdr.offset + (char*)GetMmapPtr());
-            hdr = &synthHdr;
-        }
+        hdr = SynthEhFrameHdr(synthHdr, shdr, mmapSize, mapName);
+    } else if (GetSectionInfo(shdr, DEBUG_FRAME) && GetMmapPtr() != nullptr) {
+        return FillUnwindTableByDebugFrame(shdr, loadBase, mmap_, uti);
+    } else if (IsMiniDebugInfoValid() && miniDebugInfo_->GetSectionInfo(shdr, DEBUG_FRAME)) {
+        return FillUnwindTableByDebugFrame(shdr, loadBase, miniDebugInfo_->GetMmap(), uti);
+    }
+    if (hdr == nullptr) {
+        return false;
     }
     uintptr_t shdrBase = static_cast<uintptr_t>(loadBase + shdr.addr);
     return FillUnwindTableByEhhdr(hdr, shdrBase, &uti);
@@ -614,8 +677,13 @@ int DfxElf::FindUnwindTableInfo(uintptr_t pc, std::shared_ptr<DfxMap> map, struc
         return UNW_ERROR_INVALID_MAP;
     }
     uintptr_t loadBase = GetLoadBase(map->begin, map->offset);
-    uti.startPc = GetStartPc();
-    uti.endPc = GetEndPc();
+    if (HasRuntimeRange()) {
+        uti.startPc = runtimeStart_;
+        uti.endPc = runtimeEnd_;
+    } else {
+        uti.startPc = GetStartPc();
+        uti.endPc = GetEndPc();
+    }
     if (pc < uti.startPc || pc >= uti.endPc) {
         DFXLOGU("Elf startPc: %{public}" PRIx64 ", endPc: %{public}" PRIx64 "",
             (uint64_t)uti.startPc, (uint64_t)uti.endPc);
@@ -632,7 +700,6 @@ int DfxElf::FindUnwindTableInfo(uintptr_t pc, std::shared_ptr<DfxMap> map, struc
     if (!hasTableInfo_) {
         hasTableInfo_ = FillUnwindTableByEhFrame(shdr, loadBase, map->name, uti);
     }
-
     if (hasTableInfo_) {
         uti_ = uti;
         return UNW_ERROR_NONE;

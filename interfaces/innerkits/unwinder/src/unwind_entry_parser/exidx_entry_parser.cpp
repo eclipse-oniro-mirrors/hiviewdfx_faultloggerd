@@ -184,18 +184,18 @@ bool ExidxEntryParser::SearchEntry(uintptr_t pc, const UnwindTableInfo &uti, str
 
 bool ExidxEntryParser::ExtractEntryData(uintptr_t entryOffset)
 {
-    DFXLOGU("Exidx entryOffset: %{public}llx", (uint64_t)entryOffset);
+    DFXLOGU("Exidx entryOffset: %{public}" PRIx64, (uint64_t)entryOffset);
     ops_.clear();
     uint32_t data = 0;
     if (entryOffset & 1) {
-        DFXLOGE("[%{public}d]: entryOffset: %{public}llx error.", __LINE__, (uint64_t)entryOffset);
+        DFXLOGE("[%{public}d]: entryOffset: %{public}" PRIx64 " error.", __LINE__, (uint64_t)entryOffset);
         lastErrorData_.SetAddrAndCode(entryOffset, UNW_ERROR_INVALID_ALIGNMENT);
         return false;
     }
 
     entryOffset += FOUR_BYTE_OFFSET;
     if (!memory_->Read<uint32_t>(entryOffset, &data, false)) {
-        DFXLOGE("[%{public}d]: entryOffset: %{public}llx error.", __LINE__, (uint64_t)entryOffset);
+        DFXLOGE("[%{public}d]: entryOffset: %{public}" PRIx64 " error.", __LINE__, (uint64_t)entryOffset);
         lastErrorData_.SetAddrAndCode(entryOffset, UNW_ERROR_ILLEGAL_VALUE);
         return false;
     }
@@ -289,7 +289,7 @@ bool ExidxEntryParser::ExtractEntryTabByPersonality(uintptr_t& tabOffset, uint32
 bool ExidxEntryParser::ExtractEntryTab(uintptr_t tabOffset)
 {
     uint32_t data = 0;
-    DFXLOGU("Exidx tabOffset: %{public}llx", static_cast<uint64_t>(tabOffset));
+    DFXLOGU("Exidx tabOffset: %{public}" PRIx64, static_cast<uint64_t>(tabOffset));
     if (!memory_->Read<uint32_t>(tabOffset, &data, false)) {
         lastErrorData_.SetAddrAndCode(tabOffset, UNW_ERROR_INVALID_MEMORY);
         return false;
@@ -330,7 +330,7 @@ inline bool ExidxEntryParser::GetOpCode()
     }
     curOp_ = ops_.front();
     ops_.pop_front();
-    DFXLOGU("curOp: %{public}llx", (uint64_t)curOp_);
+    DFXLOGU("curOp: %{public}" PRIx64, (uint64_t)curOp_);
     return true;
 }
 

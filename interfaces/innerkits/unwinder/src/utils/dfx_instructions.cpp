@@ -35,11 +35,13 @@ namespace {
 #define LOG_TAG "DfxInstructions"
 }
 
-bool DfxInstructions::Flush(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, uintptr_t cfa, RegLoc loc, uintptr_t& val)
+bool DfxInstructions::Flush(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, uintptr_t cfa, RegLoc loc,
+                            uintptr_t& val, bool& isDexPc)
 {
     if (memory == nullptr) {
         return false;
     }
+    isDexPc = false;
     uintptr_t location;
     switch (loc.type) {
         case REG_LOC_VAL_OFFSET:
@@ -66,6 +68,9 @@ bool DfxInstructions::Flush(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, ui
         case REG_LOC_VAL_EXPRESSION: {
             DwarfOp<uintptr_t> dwarfOp(memory);
             val = dwarfOp.Eval(regs, cfa, loc.val);
+            if (dwarfOp.DexPcSet()) {
+                isDexPc = true;
+            }
             break;
         }
         default:
@@ -87,11 +92,12 @@ bool DfxInstructions::GetCfa(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, R
             errCode = UNW_ERROR_DWARF_INVALID_CFA;
             return false;
         }
-        cfa = regs[rsState.cfaReg] + static_cast<uint32_t>(rsState.cfaRegOffset);
+        cfa = regs[rsState.cfaReg] + static_cast<int64_t>(rsState.cfaRegOffset);
     } else if (rsState.cfaExprPtr != 0) {
+        bool cfaIsDexPc = false;
         cfaLoc.type = REG_LOC_VAL_EXPRESSION;
         cfaLoc.val = static_cast<intptr_t>(rsState.cfaExprPtr);
-        if (!Flush(regs, memory, 0, cfaLoc, cfa)) {
+        if (!Flush(regs, memory, 0, cfaLoc, cfa, cfaIsDexPc)) {
             DFXLOGE("Failed to update cfa.");
             return false;
         }
@@ -112,10 +118,18 @@ bool DfxInstructions::Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, Re
     }
 
     for (size_t i = 0; i < rsState.locs.size(); i++) {
-        if (rsState.locs[i].type != REG_LOC_UNUSED) {
+        RegLocEnum locType = rsState.locs[i].type;
+        if (locType != REG_LOC_UNUSED && locType != REG_LOC_UNDEFINED) {
             size_t reg = DfxRegsQut::GetQutRegs()[i];
-            if (Flush(regs, memory, cfa, rsState.locs[i], regs[reg])) {
-                DFXLOGU("Update reg[%{public}zu] : %{public}" PRIx64 "", reg, (uint64_t)regs[reg]);
+            bool isDexPc = false;
+            uintptr_t val = 0;
+            if (Flush(regs, memory, cfa, rsState.locs[i], val, isDexPc)) {
+                if (isDexPc) {
+                    regs.SetDexPc(val);
+                    regs.SetDexPcSeen(true);
+                } else {
+                    regs[reg] = val;
+                }
             }
         }
     }
@@ -130,6 +144,10 @@ bool DfxInstructions::Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, Re
     if (rsState.returnAddressRegister >= REG_EH && rsState.returnAddressRegister < REG_LAST) {
         DFXLOGU("returnAddressRegister: %{public}d", (int)rsState.returnAddressRegister);
         regs.SetPc(regs[rsState.returnAddressRegister]);
+        if (regs.GetPc() == 0) {
+            errCode = UNW_ERROR_INVALID_MEMORY;
+            return false;
+        }
     } else {
         DFXLOGE("returnAddressRegister: %{public}d error", (int)rsState.returnAddressRegister);
         errCode = UNW_ERROR_ILLEGAL_VALUE;

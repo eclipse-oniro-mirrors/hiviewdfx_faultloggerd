@@ -32,6 +32,7 @@ public:
      * @param frame native frame object
      * @return std::string native frame string
      */
+    static std::string GetFrameStr(const DfxFrame& frame, bool isContainer);
     static std::string GetFrameStr(const DfxFrame& frame);
 
     /**
@@ -48,6 +49,7 @@ public:
      * @param frames native frame object list
      * @return std::string native frames string
      */
+    static std::string GetFramesStr(const std::vector<DfxFrame>& frames, bool isContainer);
     static std::string GetFramesStr(const std::vector<DfxFrame>& frames);
 };
 } // namespace HiviewDFX

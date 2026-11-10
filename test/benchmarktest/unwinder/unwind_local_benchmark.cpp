@@ -235,6 +235,19 @@ static void BenchmarkUnwinderLocalQut(benchmark::State& state)
 }
 BENCHMARK(BenchmarkUnwinderLocalQut);
 
+#if defined(__aarch64__)
+static void BenchmarkUnwinderLocalQutArt(benchmark::State& state)
+{
+    DfxRegsQut::SetQutRegs(QUT_ART_REGS);
+    UnwindData data;
+    data.unwinder = std::make_shared<Unwinder>();
+    data.isCache = false;
+    data.isFillFrames = false;
+    Run(state, UnwinderLocal, &data);
+}
+BENCHMARK(BenchmarkUnwinderLocalQutArt);
+#endif
+
 /**
 * @tc.name: BenchmarkUnwinderLocalQutCache
 * @tc.desc: Unwind local qut cache

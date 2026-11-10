@@ -17,6 +17,8 @@
 
 #include <cinttypes>
 #include <memory>
+#include <list>
+#include <vector>
 #include <unordered_map>
 #include "dwarf_define.h"
 #include "dfx_errors.h"
@@ -31,18 +33,41 @@ class DwarfEntryParser : public UnwindEntryParser {
 public:
     explicit DwarfEntryParser(const std::shared_ptr<DfxMemory>& memory) : UnwindEntryParser(memory) {}
     ~DwarfEntryParser() override = default;
+    void SetDebugFrameMode(bool isDebugFrame, uintptr_t entriesOffset)
+    {
+        isDebugFrame_ = isDebugFrame;
+        entriesOffset_ = entriesOffset;
+        cie32Value_ = isDebugFrame ? static_cast<uint32_t>(-1) : 0;
+        cie64Value_ = isDebugFrame ? static_cast<uint64_t>(-1) : 0;
+    }
     bool Step(uintptr_t pc, const UnwindTableInfo& uti, std::shared_ptr<RegLocState> rs) override;
 protected:
     bool SearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei) override;
     bool ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEntry& fdeInfo);
     bool ParseCie(uintptr_t cieAddr, uintptr_t ciePtr, CommonInfoEntry& cieInfo);
 private:
-    bool LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei);
+    bool LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei,
+        const FrameDescEntry** cachedFde);
+    struct FdeIndexEntry {
+        uintptr_t pcStart;
+        uintptr_t pcEnd;
+        uintptr_t fdeAddr;
+        const FrameDescEntry* entry;
+    };
+    struct SectionIndex {
+        uintptr_t tableData;
+        uintptr_t mmapId;
+        std::vector<FdeIndexEntry> entries;
+    };
+    std::list<SectionIndex> fdeIndexCache_;
+    const std::vector<FdeIndexEntry>* BuildFdeIndex(const UnwindTableInfo& uti);
     bool GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo);
     void ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeInfo, bool& isCieEntry);
     bool FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo);
     bool FillInCie(uintptr_t ptr, CommonInfoEntry& cieInfo);
     void ParseAugData(uintptr_t& ptr, CommonInfoEntry& cieInfo, const std::vector<char>& augStr);
+    bool isDebugFrame_ = false;
+    uintptr_t entriesOffset_ = 0;
     uint32_t cie32Value_ = 0;
     uint64_t cie64Value_ = 0;
     std::unordered_map<uintptr_t, FrameDescEntry> fdeEntries_;

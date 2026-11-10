@@ -22,6 +22,7 @@
 #include <memory>
 #include "dfx_errors.h"
 #include "dfx_instr_statistic.h"
+#include "dfx_log.h"
 #include "dfx_memory.h"
 #include "dfx_regs.h"
 #include "dfx_regs_qut.h"
@@ -41,6 +42,9 @@ public:
     virtual ~DwarfOp() = default;
 
     AddressType Eval(DfxRegs& regs, AddressType initStackValue, AddressType startPtr);
+
+    bool DexPcSet() const { return dexPcSet_; }
+    void ResetDexPcFlag() { dexPcSet_ = false; }
 
 protected:
     static constexpr size_t STACK_SIZE_CHECK = 2;
@@ -452,26 +456,26 @@ protected:
     inline void OpBReg(uint8_t opcode, AddressType& exprPtr, DfxRegs& regs)
     {
         auto reg = static_cast<uint32_t>(opcode - DW_OP_breg0);
-        size_t qutIdx = 0;
-        if (!DfxRegsQut::IsQutReg(static_cast<uint16_t>(reg), qutIdx)) {
+        if (reg >= regs.RegsSize()) {
             INSTR_STATISTIC(UnsupportedDwarfOp_Breg, reg, UNW_ERROR_UNSUPPORTED_QUT_REG);
             return;
         }
-        auto value = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
-        value += static_cast<SignedType>(regs[reg]);
+        auto offset = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
+        auto regVal = static_cast<SignedType>(regs[reg]);
+        auto value = offset + regVal;
         stack_.push_front(value);
     };
 
     inline void OpBRegx(AddressType& exprPtr, DfxRegs& regs)
     {
         auto reg = static_cast<uint32_t>(memory_->ReadUleb128(exprPtr));
-        size_t qutIdx = 0;
-        if (!DfxRegsQut::IsQutReg(static_cast<uint16_t>(reg), qutIdx)) {
+        if (reg >= regs.RegsSize()) {
             INSTR_STATISTIC(UnsupportedDwarfOp_Bregx, reg, UNW_ERROR_UNSUPPORTED_QUT_REG);
             return;
         }
-        auto value = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
-        value += static_cast<SignedType>(regs[reg]);
+        auto offset = static_cast<SignedType>(memory_->ReadSleb128(exprPtr));
+        auto regVal = static_cast<SignedType>(regs[reg]);
+        auto value = offset + regVal;
         stack_.push_front(value);
     };
 
@@ -483,7 +487,8 @@ protected:
 protected:
     std::shared_ptr<DfxMemory> memory_;
     std::deque<AddressType> stack_;
+    bool dexPcSet_ = false;
 };
-} // nameapace HiviewDFX
-} // nameapace OHOS
+} // namespace HiviewDFX
+} // namespace OHOS
 #endif
