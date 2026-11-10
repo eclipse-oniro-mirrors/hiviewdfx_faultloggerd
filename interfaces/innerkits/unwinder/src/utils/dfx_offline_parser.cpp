@@ -81,7 +81,7 @@ bool DfxOfflineParser::ParseBuildIdJsSymbolWithFrames(std::vector<DfxFrame>& fra
     bool result = false;
     bool prevIsStatic = false;
     for (auto& frame : frames) {
-        if (prevIsStatic) {
+        if (prevIsStatic && DfxMaps::IsJsFrame(frame)) {
             frame.frameType = FrameType::STATIC_JS_FRAME;
         }
         if (ParseBuildIdJsSymbol(frame)) {
