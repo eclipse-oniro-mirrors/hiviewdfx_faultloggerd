@@ -51,7 +51,6 @@ namespace {
 #define LOG_TAG "DfxThreadContext"
 
 #if defined(__aarch64__) || defined(__loongarch_lp64) || defined(__x86_64__)
-std::mutex g_localMutex;
 std::map<int32_t, std::shared_ptr<ThreadContext>> g_contextMap {};
 #endif
 #ifdef VERIFY_PLAT_FPGA
@@ -278,7 +277,6 @@ NO_SANITIZE LocalThreadContextMix& LocalThreadContextMix::GetInstance()
 
 bool LocalThreadContextMix::CollectThreadContext(int32_t tid)
 {
-    maps_ = DfxMaps::Create();
     StartCollectThreadContext(tid);
     InitSignalHandler();
     if (!SignalRequestThread(tid)) {
@@ -371,11 +369,16 @@ NO_SANITIZE void LocalThreadContextMix::CopyRegister(void *context)
 
 NO_SANITIZE void LocalThreadContextMix::CopyStackBuf()
 {
-    if (stackTop_ <= sp_) {
-        return;
+    size_t cpySz = 0;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (stackTop_ <= sp_) {
+            return;
+        }
+        uintptr_t curStackSz = stackTop_ - sp_;
+        cpySz = std::min(static_cast<size_t>(curStackSz), static_cast<size_t>(STACK_BUFFER_SIZE));
     }
-    uintptr_t curStackSz = stackTop_ - sp_;
-    size_t cpySz = std::min(static_cast<size_t>(curStackSz), static_cast<size_t>(STACK_BUFFER_SIZE));
+
     std::unique_lock<std::mutex> lock(mtx_);
 
     SafeReader reader;
@@ -456,36 +459,42 @@ int LocalThreadContextMix::AccessMem(uintptr_t addr, uintptr_t *val)
         return -1;
     }
     *val = 0;
+    if (maps_ == nullptr) {
+        DFXLOGE("maps_ is nullptr.");
+        return -1;
+    }
     uintptr_t result;
     if (__builtin_add_overflow(addr, sizeof(uintptr_t), &result)) {
         DFXLOGE("Failed to access addr, the addr is invalid");
         return -1;
     }
-    if (maps_ == nullptr) {
-        DFXLOGE("maps_ is nullptr.");
-        return -1;
-    }
-    if (addr < sp_ - stackForward_ || result > sp_ + stackCopiedLen_) {
+    uintptr_t stackStart = sp_ > stackForward_ ? sp_ - stackForward_ : 0;
+    if (addr < stackStart || result > sp_ + stackCopiedLen_) {
+        // outside the copied stack window: resolve through the elf file
         std::shared_ptr<DfxMap> map;
         if (!(maps_->FindMapByAddr(addr, map)) || map == nullptr) {
             return -1;
         }
         auto elf = map->GetElf(getpid());
-        if (elf != nullptr) {
-            uint64_t foff = addr - map->begin + map->offset - elf->GetBaseOffset();
-            if (elf->Read(foff, val, sizeof(uintptr_t))) {
-                return 0;
-            }
+        if (elf == nullptr) {
+            return -1;
+        }
+        uint64_t foff = addr - map->begin + map->offset - elf->GetBaseOffset();
+        if (elf->Read(foff, val, sizeof(uintptr_t))) {
+            return 0;
         }
         return -1;
     }
-    size_t stackOffset = addr - (sp_ - stackForward_);
-    if (stackBuf_.size() < sizeof(uintptr_t) || stackOffset > stackBuf_.size() - sizeof(uintptr_t) ||
-        stackOffset + sizeof(uintptr_t) > stackCopiedLen_ + stackForward_) {
+    // stack buffer read
+    size_t stackOffset = addr - stackStart;
+    if (stackBuf_.size() < sizeof(uintptr_t) || stackOffset > stackBuf_.size() - sizeof(uintptr_t)) {
         DFXLOGE("Failed to access addr, the stackOffset is invalid");
         return -1;
     }
-    *val = *(reinterpret_cast<uintptr_t *>(&stackBuf_[stackOffset]));
+    if (memcpy_s(val, sizeof(uintptr_t), &stackBuf_[stackOffset], sizeof(uintptr_t)) != 0) {
+        DFXLOGE("Failed to copy stack memory");
+        return -1;
+    }
     return 0;
 }
 

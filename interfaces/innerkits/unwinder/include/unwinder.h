@@ -34,7 +34,7 @@ public:
     Unwinder(int pid, bool crash = true, std::shared_ptr<DfxMaps> maps = nullptr, bool isContainer = false);
     Unwinder(int pid, int nspid, bool crash, std::shared_ptr<DfxMaps> maps = nullptr);
     // for customized
-    Unwinder(std::shared_ptr<UnwindAccessors> accessors, bool local = false);
+    Unwinder(std::shared_ptr<UnwindAccessors> accessors, bool local = false, bool needMaps = false);
     ~Unwinder() = default;
 
     // disallow copy and move

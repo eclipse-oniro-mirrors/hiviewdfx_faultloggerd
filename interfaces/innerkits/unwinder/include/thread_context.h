@@ -102,13 +102,22 @@ public:
     std::shared_ptr<DfxMaps> GetMaps() const;
     static std::shared_ptr<UnwindAccessors> CreateAccessors();
 
-    void SetMaps(std::shared_ptr<DfxMaps> maps) { maps_ = maps; }
+    void SetMaps(std::shared_ptr<DfxMaps> maps)
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        maps_ = std::move(maps);
+    }
     void SetStackBuf(std::vector<uint8_t> stackBuf)
     {
-        stackBuf_ = stackBuf;
+        std::lock_guard<std::mutex> lock(mtx_);
         stackCopiedLen_ = stackBuf.size();
+        stackBuf_ = std::move(stackBuf);
     }
-    void SetStackForward(unsigned int forward) { stackForward_ = forward; }
+    void SetStackForward(unsigned int forward)
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        stackForward_ = forward;
+    }
 
 private:
     LocalThreadContextMix() = default;

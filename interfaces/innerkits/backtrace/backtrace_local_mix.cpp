@@ -50,7 +50,7 @@ bool GetBacktraceStringByTidWithMix(std::string& out, int32_t tid, size_t skipFr
     if ((tid == gettid()) || (tid == BACKTRACE_CURRENT_THREAD)) {
         unwinder = std::make_shared<Unwinder>();
     } else {
-        unwinder = std::make_shared<Unwinder>(LocalThreadContextMix::CreateAccessors(), true);
+        unwinder = std::make_shared<Unwinder>(LocalThreadContextMix::CreateAccessors(), true, true);
     }
     std::vector<DfxFrame> frames{};
     bool ret = false;

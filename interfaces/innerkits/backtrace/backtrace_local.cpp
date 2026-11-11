@@ -60,7 +60,7 @@ bool GetBacktraceFramesByTid(std::vector<DfxFrame>& frames, int32_t tid, size_t 
     if ((tid == gettid()) || (tid == BACKTRACE_CURRENT_THREAD)) {
         unwinder = std::make_shared<Unwinder>();
     } else {
-        unwinder = std::make_shared<Unwinder>(LocalThreadContextMix::CreateAccessors(), true);
+        unwinder = std::make_shared<Unwinder>(LocalThreadContextMix::CreateAccessors(), true, true);
     }
     BacktraceLocalThread thread(tid);
     bool ret = thread.UnwindOtherThreadMix(*unwinder, fast, maxFrameNums, skipFrameNum + 1);
