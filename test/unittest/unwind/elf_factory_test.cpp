@@ -16,11 +16,17 @@
 
 #include <cstdio>
 #include <dlfcn.h>
+#include <cerrno>
 #include <cstdint>
 
 #include "dfx_maps.h"
 #include "dfx_symbols.h"
 #include "dfx_test_util.h"
+#include <unistd.h>
+#include "dfx_elf.h"
+#include "dfx_map.h"
+#include "elf_craft_builder.h"
+#include "elf_factory.h"
 #include "elf_factory_selector.h"
 #include "unwinder_config.h"
 
@@ -337,6 +343,204 @@ HWTEST_F(ElfFactoryTest, ElfFactoryTest014, TestSize.Level2)
     elf = elfFactory->Create();
     ASSERT_EQ(elf, nullptr);
     GTEST_LOG_(INFO) << "ElfFactoryTest014: end.";
+}
+
+namespace {
+std::string WriteElfFile(const std::vector<uint8_t>& data, const std::string& suffix)
+{
+    std::string path = "/data/local/tmp/elf_factory_test_XXXXXX" + suffix;
+    std::vector<char> buf(path.begin(), path.end());
+    buf.push_back(0);
+    int fd = mkstemps(buf.data(), static_cast<int>(suffix.size()));
+    if (fd < 0) {
+        return "";
+    }
+    size_t written = 0;
+    while (written < data.size()) {
+        ssize_t n = write(fd, data.data() + written, data.size() - written);
+        if (n < 0 && errno == EINTR) {
+            continue; // interrupted before writing anything, retry
+        }
+        if (n <= 0) {
+            close(fd);
+            unlink(buf.data());
+            return "";
+        }
+        written += static_cast<size_t>(n);
+    }
+    close(fd);
+    return std::string(buf.data());
+}
+} // namespace
+
+/**
+ * @tc.name: ElfFactoryTest015
+ * @tc.desc: test CompressHapElfFactory guard clauses
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest015, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest015: start.";
+    // neither an offset nor a prev map: nothing can be loaded
+    CompressHapElfFactory noSource("/data/local/tmp/guard.apk", nullptr, 0, 0);
+    ASSERT_EQ(noSource.Create(), nullptr);
+    // hap without the sandbox prefix is illegal
+    CompressHapElfFactory badHap("/data/local/tmp/guard.hap", nullptr, 0x100, 0x100);
+    ASSERT_EQ(badHap.Create(), nullptr);
+    // neither hap nor apk
+    CompressHapElfFactory badSuffix("/data/local/tmp/guard.so", nullptr, 0x100, 0x100);
+    ASSERT_EQ(badSuffix.Create(), nullptr);
+    // apk pointing at a missing file
+    CompressHapElfFactory missingFile("/data/local/tmp/not_exist_guard.apk", nullptr, 0x100, 0x100);
+    ASSERT_EQ(missingFile.Create(), nullptr);
+    GTEST_LOG_(INFO) << "ElfFactoryTest015: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest016
+ * @tc.desc: test LoadEmbeddedElf loads an elf image embedded at a file offset
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest016, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest016: start.";
+    CraftedElfOptions opt;
+    opt.withText = true;
+    auto image = ElfCraftBuilder::Build(opt);
+    std::vector<uint8_t> file(0x1000, 0x41); // 0x1000 : leading padding
+    file.insert(file.end(), image.begin(), image.end());
+    std::string goodPath = WriteElfFile(file, ".apk");
+    if (goodPath.empty()) {
+        GTEST_SKIP() << "temp file not writable";
+    }
+
+    CompressHapElfFactory factory(goodPath, nullptr, 0x1000, image.size());
+    auto elf = factory.Create();
+    ASSERT_NE(elf, nullptr);
+    EXPECT_TRUE(elf->IsValid());
+    EXPECT_EQ(elf->GetBaseOffset(), 0x1000U);
+
+    // prev map fallback: curOffset is zero, the elf sits at prevMap->offset
+    auto prevMap = std::make_shared<DfxMap>(0x7000000, 0x7000000 + image.size(), 0x1000, PROT_READ, goodPath);
+    CompressHapElfFactory prevFactory(goodPath, prevMap, 0, 0);
+    auto prevElf = prevFactory.Create();
+    ASSERT_NE(prevElf, nullptr);
+    EXPECT_EQ(prevElf->GetBaseOffset(), 0x1000U);
+
+    unlink(goodPath.c_str());
+    GTEST_LOG_(INFO) << "ElfFactoryTest016: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest017
+ * @tc.desc: test ElfFactorySelector routes hap/apk/vdso/plain maps
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest017, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest017: start.";
+    auto prev = std::make_shared<DfxMap>(0x7000000, 0x7001000, 0x800, PROT_READ,
+        "/data/storage/el1/bundle/test.hap");
+
+    // no rtti in this target: assert through the observable map offset side effects
+    DfxMap hapMap(0x7001000, 0x7002000, 0x1000, PROT_READ, "/data/storage/el1/bundle/test.hap");
+    hapMap.prevMap = prev;
+    auto hapFactory = ElfFactorySelector::Select(hapMap, getpid());
+    ASSERT_NE(hapFactory, nullptr);
+    EXPECT_EQ(hapMap.offset, 0x800U); // 0x800 : relative to the previous hap map
+
+    DfxMap apkMap(0x7100000, 0x7101000, 0x2000, PROT_READ, "/data/app/el1/bundle/test.apk");
+    apkMap.prevMap = prev;
+    auto apkFactory = ElfFactorySelector::Select(apkMap, getpid());
+    ASSERT_NE(apkFactory, nullptr);
+    EXPECT_EQ(apkMap.offset, 0U); // apk maps are rebased to their own start
+
+    DfxMap vdsoMap(0x7200000, 0x7201000, 0, PROT_EXEC, "[vdso]");
+    auto vdsoFactory = ElfFactorySelector::Select(vdsoMap, getpid());
+    EXPECT_NE(vdsoFactory, nullptr);
+
+    DfxMap plainMap(0x7300000, 0x7301000, 0, PROT_EXEC, "/system/lib/libtest.so");
+    auto plainFactory = ElfFactorySelector::Select(plainMap, getpid());
+    EXPECT_NE(plainFactory, nullptr);
+    GTEST_LOG_(INFO) << "ElfFactoryTest017: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest018
+ * @tc.desc: test VdsoElfFactory loads the vdso mapping of this process
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest018, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest018: start.";
+    // size guard: oversized requests are rejected before any read
+    VdsoElfFactory huge(0x1000, 10 * 1024 * 1024, getpid());
+    ASSERT_EQ(huge.Create(), nullptr);
+
+    auto maps = DfxMaps::Create(getpid());
+    ASSERT_NE(maps, nullptr);
+    uintptr_t vdsoBegin = 0;
+    size_t vdsoSize = 0;
+    for (const auto& map : maps->GetMaps()) {
+        if (map != nullptr && map->name == "[vdso]" && map->IsMapExec()) {
+            vdsoBegin = static_cast<uintptr_t>(map->begin);
+            vdsoSize = static_cast<size_t>(map->end - map->begin);
+            break;
+        }
+    }
+    if (vdsoBegin == 0) {
+        GTEST_SKIP() << "no [vdso] mapping found";
+    }
+    VdsoElfFactory factory(vdsoBegin, vdsoSize, getpid());
+    auto elf = factory.Create();
+    ASSERT_NE(elf, nullptr);
+    EXPECT_TRUE(elf->IsValid());
+    GTEST_LOG_(INFO) << "ElfFactoryTest018: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest019
+ * @tc.desc: test malformed embedded elf images are rejected by LoadEmbeddedElf
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest019, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest019: start.";
+    CraftedElfOptions opt;
+    opt.withText = true;
+    auto image = ElfCraftBuilder::Build(opt);
+
+    // an elf whose section table runs past the file end is rejected
+    std::vector<uint8_t> truncFile(0x1000, 0x41); // 0x1000 : leading padding
+    truncFile.insert(truncFile.end(), image.begin(), image.begin() + sizeof(Elf64_Ehdr));
+    std::string truncPath = WriteElfFile(truncFile, ".apk");
+    if (truncPath.empty()) {
+        GTEST_SKIP() << "temp file not writable";
+    }
+    CompressHapElfFactory truncFactory(truncPath, nullptr, 0x1000, image.size());
+    ASSERT_EQ(truncFactory.Create(), nullptr);
+    unlink(truncPath.c_str());
+
+    // a computed elf size of zero (no section table) is rejected
+    std::vector<uint8_t> zeroImage = image;
+    const uint64_t zeroShoff = 0;
+    if (memcpy_s(zeroImage.data() + 0x28, 8, &zeroShoff, 8) != 0) { // 0x28 : e_shoff offset
+        ASSERT_TRUE(false);
+    }
+    const uint16_t zeroShnum = 0;
+    if (memcpy_s(zeroImage.data() + 0x3c, 2, &zeroShnum, 2) != 0) { // 0x3c : e_shnum offset
+        ASSERT_TRUE(false);
+    }
+    std::vector<uint8_t> zeroFile(0x1000, 0x41);
+    zeroFile.insert(zeroFile.end(), zeroImage.begin(), zeroImage.end());
+    std::string zeroPath = WriteElfFile(zeroFile, ".apk");
+    if (zeroPath.empty()) {
+        GTEST_SKIP() << "temp file not writable";
+    }
+    CompressHapElfFactory zeroFactory(zeroPath, nullptr, 0x1000, image.size());
+    ASSERT_EQ(zeroFactory.Create(), nullptr);
+    unlink(zeroPath.c_str());
+    GTEST_LOG_(INFO) << "ElfFactoryTest019: end.";
 }
 }
 }

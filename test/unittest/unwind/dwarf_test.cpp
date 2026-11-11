@@ -34,20 +34,17 @@
 #include "string_ex.h"
 
 #include "dfx_define.h"
-#define private public
+#define protected public
 #include "dfx_instructions.h"
-#undef private
+#include "dfx_regs.h"
+#include "dfx_regs_qut.h"
+#undef protected
 #include "dfx_log.h"
 #include "dfx_memory.h"
-#include "dfx_regs.h"
-#define private public
 #include "dwarf_cfa_instructions.h"
-#undef private
 #include "dwarf_define.h"
 #include "dwarf_op.h"
-#define private public
 #include "dwarf_entry_parser.h"
-#undef private
 #include "elf_factory.h"
 #include "thread_context.h"
 #include "unwind_arm64_define.h"
@@ -97,6 +94,39 @@ public:
     void SetBuffer(uintptr_t addr, std::vector<uint8_t> buffer);
     void Reset();
     bool increaseAddr = false;
+
+private:
+    std::vector<MemoryArea> buffers;
+};
+
+/*
+ * Memory stub with exact incre semantics: the address only advances when the
+ * caller asks for it. The entry parser relies on this distinction (for example
+ * the CIE id read must not move the cursor), which DfxMemoryTest's global
+ * increaseAddr switch cannot express.
+ */
+class DfxIncrementMemoryTest : public DfxMemory {
+public:
+    size_t Read(uintptr_t& addr, void* val, size_t size, bool incre = false) override
+    {
+        for (const auto& area : buffers) {
+            if (addr >= area.addr && addr + size <= area.addr + area.data.size()) {
+                size_t offset = addr - area.addr;
+                auto data = const_cast<uint8_t*>(area.data.data());
+                (void)memcpy_s(val, size, data + offset, size);
+                if (incre) {
+                    addr = addr + size;
+                }
+                return size;
+            }
+        }
+        return 0;
+    }
+
+    void SetBuffer(uintptr_t addr, std::vector<uint8_t> buffer)
+    {
+        buffers.push_back({addr, buffer});
+    }
 
 private:
     std::vector<MemoryArea> buffers;
@@ -525,19 +555,19 @@ HWTEST_F(DwarfTest, DwarfTest001, TestSize.Level2)
             uintptr_t pc = reinterpret_cast<uintptr_t>(requestFdFunc) + pcOffset;
             struct UnwindTableInfo uti;
             ASSERT_EQ(DfxElf::FindUnwindTableLocal(pc, uti), 0);
-        
+
             auto memory = std::make_shared<DfxMemory>(UNWIND_TYPE_LOCAL);
             DwarfEntryParserTest dwarfEntryParser(memory);
             struct UnwindEntryInfo pi;
             ASSERT_EQ(true, dwarfEntryParser.SearchEntryTest(pc, uti, pi));
-        
+
             FrameDescEntry fde;
             ASSERT_EQ(true, dwarfEntryParser.ParseFdeTest(reinterpret_cast<uintptr_t>(pi.unwindInfo), fde));
             ASSERT_GT(fde.cieAddr, 0);
-        
+
             CommonInfoEntry cie;
             ASSERT_EQ(true, dwarfEntryParser.ParseCieTest(fde.cieAddr, cie));
-        
+
             RegLocState rsState;
             DwarfCfaInstructions instructions(memory);
             ASSERT_EQ(true, instructions.Parse(pc, fde, rsState));
@@ -559,7 +589,7 @@ HWTEST_F(DwarfTest, DwarfTest001, TestSize.Level2)
             ASSERT_EQ(cie.returnAddressRegister, 30);
             ASSERT_EQ(cie.hasAugmentationData, true);
             ASSERT_EQ(cie.pointerEncoding, 0x1b);
-        
+
             /*
                 DW_CFA_advance_loc: 20 to 0000000000002718
                 DW_CFA_def_cfa_offset: 112
@@ -582,7 +612,7 @@ HWTEST_F(DwarfTest, DwarfTest001, TestSize.Level2)
             ASSERT_EQ(fde.pcStart, reinterpret_cast<uintptr_t>(requestFdFunc));
             ASSERT_EQ(rsState.cfaReg, REG_AARCH64_X29);
             ASSERT_EQ(rsState.cfaRegOffset, 112); // 112 : DW_CFA_def_cfa: r29 (x29) ofs 112
-        
+
             size_t qutIdx = 0;
             if (DfxRegsQut::IsQutReg(static_cast<uint16_t>(REG_AARCH64_X30), qutIdx)) {
                 ASSERT_EQ(static_cast<uint8_t>(rsState.locs[qutIdx].type),
@@ -594,12 +624,12 @@ HWTEST_F(DwarfTest, DwarfTest001, TestSize.Level2)
                     static_cast<uint8_t>(REG_LOC_MEM_OFFSET));
                 ASSERT_EQ(rsState.locs[qutIdx].val, -112); // -112: r29 (x29) at cfa-112
             }
-        
+
             RegLocState rsState2;
             ASSERT_EQ(true, instructions.Parse(reinterpret_cast<uintptr_t>(requestFdFunc), fde, rsState2));
             ASSERT_EQ(rsState2.cfaReg, REG_AARCH64_X31);
             ASSERT_EQ(rsState2.cfaRegOffset, 0); // DW_CFA_def_cfa: r31 (sp) ofs 0
-        
+
             RegLocState rsState3;
             ASSERT_EQ(true, instructions.Parse(reinterpret_cast<uintptr_t>(requestFdFunc) + 24, fde, rsState3));
             ASSERT_EQ(rsState3.cfaReg, REG_AARCH64_X31);
@@ -1241,6 +1271,429 @@ HWTEST_F(DwarfTest, DwarfCfaInstructionsTest001, TestSize.Level2)
         ASSERT_EQ(DwarfDecode(values[i]), true);
     }
     GTEST_LOG_(INFO) << "DwarfCfaInstructionsTest001: end.";
+}
+
+namespace {
+/*
+ * Craft an eh_frame section image: one CIE (version 1, augmentation "zR",
+ * pointer encoding pcrel|sdata4) followed by fdeCount FDEs whose pc ranges
+ * cover [pcBase + i * pcRangeSize, pcBase + (i + 1) * pcRangeSize).
+ * The image is registered at the fake address base through DfxMemoryTest.
+ */
+/*
+ * Byte writer for crafted eh_frame images: 32 bit entries by default, or the
+ * 0xffffffff escaped 64 bit form. All multi byte values are little endian.
+ */
+struct EhFrameWriter {
+    std::vector<uint8_t>& data;
+    bool use64 = false;
+
+    void Put8(uint8_t v)
+    {
+        data.push_back(v);
+    }
+
+    void Put32(uint32_t v)
+    {
+        data.push_back(static_cast<uint8_t>(v));
+        data.push_back(static_cast<uint8_t>(v >> 8)); // 8 : shift
+        data.push_back(static_cast<uint8_t>(v >> 16)); // 16 : shift
+        data.push_back(static_cast<uint8_t>(v >> 24)); // 24 : shift
+    }
+
+    void Put64(uint64_t v)
+    {
+        Put32(static_cast<uint32_t>(v));
+        Put32(static_cast<uint32_t>(v >> 32)); // 32 : shift
+    }
+
+    // header form: 32 bit length + 32 bit id, or the 0xffffffff escape with 64 bit fields
+    void PutLen(uint64_t lenValue)
+    {
+        if (use64) {
+            Put32(0xffffffff);
+            Put64(lenValue);
+        } else {
+            Put32(static_cast<uint32_t>(lenValue));
+        }
+    }
+
+    void PutId(uint64_t v)
+    {
+        if (use64) {
+            Put64(v);
+        } else {
+            Put32(static_cast<uint32_t>(v));
+        }
+    }
+
+    // back fill the length field: value covers everything after the length field
+    void PatchLen(size_t pos)
+    {
+        const size_t headerWidth = use64 ? 12 : 4; // 12 : 0xffffffff escape plus 64 bit length
+        const uint64_t len = data.size() - pos - headerWidth;
+        if (use64) {
+            const uint64_t escaped = 0xffffffff;
+            for (size_t b = 0; b < 4; b++) { // 4 : escape field
+                data[pos + b] = static_cast<uint8_t>(escaped >> (8 * b)); // 8 : byte shift
+            }
+            for (size_t b = 0; b < 8; b++) { // 8 : 64 bit length field
+                data[pos + 4 + b] = static_cast<uint8_t>(len >> (8 * b)); // 8 : byte shift
+            }
+        } else {
+            const uint32_t len32 = static_cast<uint32_t>(len);
+            for (size_t b = 0; b < 4; b++) { // 4 : length field
+                data[pos + b] = static_cast<uint8_t>(len32 >> (8 * b)); // 8 : byte shift
+            }
+        }
+    }
+};
+
+/*
+ * Append one CIE: version 1, augmentation zR, pointer encoding pcrel|sdata4.
+ * badCieVersion swaps the version byte so the parser rejects the entry.
+ * withDefCfa emits DW_CFA_def_cfa(sp, 0) as the initial instruction instead of
+ * a single nop: the CIE grows by two bytes and PatchLen plus every later pcrel
+ * reference adapt to the real field positions.
+ */
+void AppendCieEntry(EhFrameWriter& w, bool badCieVersion, bool withDefCfa = false)
+{
+    const size_t cieLenPos = w.data.size();
+    w.PutLen(0); // length placeholder of the right width
+    w.PutId(0); // cie id: eh_frame CIE
+    if (w.use64) {
+        // the parser advances eight bytes past the 64 bit id before reading the
+        // version, keep the fields where it expects them
+        w.Put64(0);
+    }
+    w.Put8(badCieVersion ? 99 : 1); // 99 : invalid cie version on purpose, 1 : version
+    w.Put8('z');
+    w.Put8('R');
+    w.Put8(0); // augmentation string terminator
+    w.Put8(1); // code alignment factor
+    w.Put8(0x78); // data alignment factor : sleb128 of -8
+    constexpr uint8_t raRegister = 30; // 30 : arm64 return address register
+    w.Put8(raRegister);
+    w.Put8(1); // augmentation data size
+    w.Put8(0x1b); // pointer encoding : pcrel | sdata4
+    if (withDefCfa) {
+        w.Put8(0x0c); // DW_CFA_def_cfa
+        w.Put8(31);   // 31 : sp register
+        w.Put8(0x00); // 0 : cfa offset
+    } else {
+        w.Put8(0x00); // DW_CFA_nop
+    }
+    w.PatchLen(cieLenPos);
+}
+
+/*
+ * Append one FDE covering [pcStart, pcStart + pcRangeSize) with a back reference
+ * to the CIE at cieStart. badFdeAugLen writes an overflowing augmentation length.
+ */
+void AppendFdeEntry(EhFrameWriter& w, uintptr_t base, uintptr_t cieStart, uintptr_t pcStart,
+    uintptr_t pcRangeSize, bool badFdeAugLen)
+{
+    const size_t lenPos = w.data.size();
+    const size_t lengthFieldSize = w.use64 ? 12 : 4; // 12 : escape + 64 bit length
+    const size_t addrFieldSize = w.use64 ? 8 : 4; // 8 : 64 bit id fields
+    w.PutLen(0); // length placeholder of the right width
+    const uintptr_t idFieldAddr = base + lenPos + lengthFieldSize;
+    // in the 64 bit form the parser has already advanced eight bytes past the
+    // id when it computes the cie address, include that skip in the back reference
+    const uintptr_t cieRefPos = idFieldAddr + (w.use64 ? 8 : 0); // 8 : 64 bit id skip
+    w.PutId(cieRefPos - cieStart); // cie pointer is back relative
+    if (w.use64) {
+        w.Put64(0); // same eight byte skip as in the CIE above
+    }
+    const uintptr_t pcBeginFieldAddr = idFieldAddr + addrFieldSize +
+        (w.use64 ? 8 : 0); // 8 : the 64 bit id skip
+    const uint32_t pcBegin = static_cast<uint32_t>(pcStart - pcBeginFieldAddr); // pcrel
+    w.Put32(pcBegin);
+    w.Put32(static_cast<uint32_t>(pcRangeSize)); // pc range
+    if (badFdeAugLen) {
+        // uleb128 of 0xffffffff: ptr + augLen overflows and the fde is rejected
+        w.Put8(0xff);
+        w.Put8(0xff);
+        w.Put8(0xff);
+        w.Put8(0xff);
+        w.Put8(0x0f);
+    } else {
+        w.Put8(0); // augmentation data length
+    }
+    w.Put8(0x00); // DW_CFA_nop
+    w.PatchLen(lenPos);
+}
+
+/*
+ * Craft an eh_frame section image: one CIE followed by fdeCount FDEs whose pc
+ * ranges cover [pcBase + i * pcRangeSize, pcBase + (i + 1) * pcRangeSize).
+ */
+std::vector<uint8_t> BuildEhFrameImage(uintptr_t base, size_t fdeCount, uintptr_t pcBase,
+    uintptr_t pcRangeSize, bool use64BitHeader = false, bool badCieVersion = false,
+    bool badFdeAugLen = false, bool cieDefCfa = false)
+{
+    std::vector<uint8_t> data;
+    EhFrameWriter writer {data, use64BitHeader};
+    AppendCieEntry(writer, badCieVersion, cieDefCfa);
+    const uintptr_t cieStart = base;
+    for (size_t i = 0; i < fdeCount; i++) {
+        AppendFdeEntry(writer, base, cieStart, pcBase + i * pcRangeSize, pcRangeSize, badFdeAugLen);
+    }
+    return data;
+}
+} // namespace
+
+/**
+ * @tc.name: DwarfLinearSearchEntryTest001
+ * @tc.desc: test LinearSearchEntry walks a small eh_frame section and finds the FDE
+ * @tc.type: FUNC
+ */
+HWTEST_F(DwarfTest, DwarfLinearSearchEntryTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest001: start.";
+    const uintptr_t base = 0x10000;
+    const uintptr_t pcBase = base + 0x1000; // 0x1000 : keep pcrel offsets positive and small
+    const uintptr_t pcRange = 0x100;
+    auto image = BuildEhFrameImage(base, 2, pcBase, pcRange); // 2 : two FDEs
+    auto memory = std::make_shared<DfxIncrementMemoryTest>();
+    memory->SetBuffer(base, image);
+    DwarfEntryParserTest parser(memory);
+
+    UnwindTableInfo uti;
+    uti.tableData = base;
+    uti.tableLen = 3; // 3 : one CIE plus two FDEs
+    uti.endPc = base + image.size();
+    uti.segbase = 0;
+
+    UnwindEntryInfo uei;
+    const FrameDescEntry* cachedFde = nullptr;
+    EXPECT_TRUE(parser.LinearSearchEntry(pcBase + 0x40, uti, uei, &cachedFde));
+    EXPECT_NE(uei.unwindInfo, nullptr);
+    EXPECT_EQ(uei.unwindInfo, reinterpret_cast<void*>(base + 18)); // 18 : CIE is 4 + 14 bytes, then the first FDE
+
+    UnwindEntryInfo miss;
+    EXPECT_FALSE(parser.LinearSearchEntry(pcBase + 0x1000, uti, miss, &cachedFde)); // outside all ranges
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest001: end.";
+}
+
+/**
+ * @tc.name: DwarfLinearSearchEntryTest002
+ * @tc.desc: test LinearSearchEntry stops on a malformed entry
+ * @tc.type: FUNC
+ */
+HWTEST_F(DwarfTest, DwarfLinearSearchEntryTest002, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest002: start.";
+    const uintptr_t base = 0x18000;
+    const uintptr_t pcBase = base + 0x1000; // 0x1000 : keep pcrel offsets positive and small
+    auto image = BuildEhFrameImage(base, 1, pcBase, 0x100); // 1 : one FDE
+    // corrupt the first byte of the FDE cie pointer (fde layout is
+    // length + cie pointer + pc begin + range + aug len + nop = 18 bytes)
+    image[image.size() - 14] = 0x7f; // 14 : cie pointer offset inside the trailing FDE
+    auto memory = std::make_shared<DfxIncrementMemoryTest>();
+    memory->SetBuffer(base, image);
+    DwarfEntryParserTest parser(memory);
+
+    UnwindTableInfo uti;
+    uti.tableData = base;
+    uti.tableLen = 3; // 3 : one CIE plus two FDEs
+    uti.endPc = base + image.size();
+    uti.segbase = 0;
+
+    UnwindEntryInfo uei;
+    const FrameDescEntry* cachedFde = nullptr;
+    // the pc belongs to the corrupted FDE range: the walk fails instead of crashing
+    EXPECT_FALSE(parser.LinearSearchEntry(pcBase + 0x40, uti, uei, &cachedFde));
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest002: end.";
+}
+
+/**
+ * @tc.name: DwarfLinearSearchEntryTest003
+ * @tc.desc: test LinearSearchEntry builds and reuses the FDE index for a large section
+ * @tc.type: FUNC
+ */
+HWTEST_F(DwarfTest, DwarfLinearSearchEntryTest003, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest003: start.";
+    const uintptr_t base = 0x30000;
+    const uintptr_t pcBase = base + 0x1000; // 0x1000 : keep pcrel offsets positive and small
+    const uintptr_t pcRange = 0x100;
+    constexpr size_t fdeCount = 80; // 80 : above the small section threshold of 64
+    auto image = BuildEhFrameImage(base, fdeCount, pcBase, pcRange);
+    auto memory = std::make_shared<DfxIncrementMemoryTest>();
+    memory->SetBuffer(base, image);
+    DwarfEntryParserTest parser(memory);
+
+    UnwindTableInfo uti;
+    uti.tableData = base;
+    uti.tableLen = fdeCount + 1; // 1 : the CIE
+    uti.endPc = base + image.size();
+    uti.segbase = 0;
+
+    UnwindEntryInfo uei;
+    const FrameDescEntry* cachedFde = nullptr;
+    // first FDE range and a middle FDE range are found through the binary index
+    EXPECT_TRUE(parser.LinearSearchEntry(pcBase + 0x40, uti, uei, &cachedFde));
+    EXPECT_NE(uei.unwindInfo, nullptr);
+    EXPECT_TRUE(parser.LinearSearchEntry(pcBase + 0x42 * pcRange + 0x40, uti, uei, &cachedFde)); // 0x42 : middle FDE
+    // second lookup of the same pc hits the cached index
+    EXPECT_TRUE(parser.LinearSearchEntry(pcBase + 0x40, uti, uei, &cachedFde));
+    // pc beyond every FDE range is not found
+    EXPECT_FALSE(parser.LinearSearchEntry(pcBase + fdeCount * pcRange + 0x10, uti, uei, &cachedFde));
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest003: end.";
+}
+
+/**
+ * @tc.name: DwarfLinearSearchEntryTest004
+ * @tc.desc: test LinearSearchEntry parses the 64 bit escaped eh_frame header
+ * @tc.type: FUNC
+ */
+HWTEST_F(DwarfTest, DwarfLinearSearchEntryTest004, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest004: start.";
+    const uintptr_t base = 0x50000;
+    const uintptr_t pcBase = base + 0x1000; // 0x1000 : keep pcrel offsets positive and small
+    auto image = BuildEhFrameImage(base, 2, pcBase, 0x100, true); // 2 : FDEs, true : 64 bit header
+    auto memory = std::make_shared<DfxIncrementMemoryTest>();
+    memory->SetBuffer(base, image);
+    DwarfEntryParserTest parser(memory);
+
+    UnwindTableInfo uti;
+    uti.tableData = base;
+    uti.tableLen = 3; // 3 : one CIE plus two FDEs
+    uti.endPc = base + image.size();
+    uti.segbase = 0;
+
+    UnwindEntryInfo uei;
+    const FrameDescEntry* cachedFde = nullptr;
+    EXPECT_TRUE(parser.LinearSearchEntry(pcBase + 0x40, uti, uei, &cachedFde));
+    EXPECT_NE(uei.unwindInfo, nullptr);
+    GTEST_LOG_(INFO) << "DwarfLinearSearchEntryTest004: end.";
+}
+
+/**
+ * @tc.name: DwarfStepTest001
+ * @tc.desc: test Step drives the full search, fde and cfa instruction chain
+ * @tc.type: FUNC
+ */
+HWTEST_F(DwarfTest, DwarfStepTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DwarfStepTest001: start.";
+    const uintptr_t base = 0x78000;
+    const uintptr_t pcBase = base + 0x1000; // 0x1000 : keep pcrel offsets positive and small
+    // the CIE carries DW_CFA_def_cfa(sp, 0) as a real three byte instruction:
+    // the CIE content grows to 16 bytes, every length field and pcrel reference
+    // is back filled from the real positions
+    std::vector<uint8_t> image = BuildEhFrameImage(base, 1, pcBase, 0x100, false, false, false, true);
+    auto memory = std::make_shared<DfxIncrementMemoryTest>();
+    memory->SetBuffer(base, image);
+    DwarfEntryParserTest parser(memory);
+
+    auto regs = std::make_shared<DfxRegsArm64>();
+    (*regs)[REG_SP] = 0x91000;
+    auto rs = std::make_shared<RegLocState>();
+
+    UnwindTableInfo uti;
+    uti.tableData = base;
+    uti.tableLen = 2; // 2 : one CIE plus one FDE
+    uti.endPc = base + image.size();
+    uti.segbase = 0;
+    uti.isLinear = true;
+
+    EXPECT_TRUE(parser.Step(pcBase + 0x40, uti, rs));
+    EXPECT_EQ(rs->cfaReg, 31U); // 31 : def_cfa sp picked up by the cfa walk
+    GTEST_LOG_(INFO) << "DwarfStepTest001: end.";
+}
+
+/**
+ * @tc.name: DfxInstructionsApplyTest001
+ * @tc.desc: test Apply restores mem offset registers and skips undefined ones
+ * @tc.type: FUNC
+ */
+HWTEST_F(DwarfTest, DfxInstructionsApplyTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxInstructionsApplyTest001: start.";
+    // save and restore the global qut register set around this test
+    auto savedRegs = DfxRegsQut::GetQutRegs();
+    bool savedLocked = DfxRegsQut::qutRegsLocked_;
+    DfxRegsQut::SetQutRegs(QUT_REGS);
+    DfxRegsQut::qutRegsLocked_ = savedLocked;
+
+    auto memory = std::make_shared<DfxIncrementMemoryTest>();
+    auto regs = std::make_shared<DfxRegsArm64>();
+    const uintptr_t fakeStack = 0x90000;
+    (*regs)[REG_SP] = fakeStack;
+    // the slot a mem offset register restore reads from
+    const uintptr_t savedSlot = fakeStack + 0x10;
+    std::vector<uint8_t> slotVal(8); // 8 : uintptr slot
+    const uintptr_t slotValue = 0x1234;
+    if (memcpy_s(slotVal.data(), slotVal.size(), &slotValue, sizeof(slotValue)) != 0) {
+        ASSERT_TRUE(false);
+    }
+    memory->SetBuffer(savedSlot, slotVal);
+
+    RegLocState rsState(DfxRegsQut::GetQutRegsSize());
+    rsState.cfaReg = REG_SP; // register based cfa, no expression involved
+    rsState.cfaRegOffset = 0;
+    rsState.returnAddressRegister = REG_LR; // pc is restored from lr
+    // locs are indexed like QUT_REGS: x0, fp, sp, pc, lr
+    rsState.locs[0].type = REG_LOC_UNDEFINED; // 0 : x0 stays untouched
+    rsState.locs[3].type = REG_LOC_MEM_OFFSET; // 3 : pc slot, must be restored
+    rsState.locs[3].val = 0x10; // 0x10 : cfa relative offset
+    rsState.locs[4].type = REG_LOC_MEM_OFFSET; // 4 : lr slot
+    rsState.locs[4].val = 0x10; // 0x10 : cfa relative offset
+
+    uint16_t errCode = 0;
+    EXPECT_TRUE(DfxInstructions::Apply(memory, *regs, rsState, errCode));
+    EXPECT_EQ((*regs)[REG_LR], slotValue); // 0x1234 : value read from the fake slot
+
+    // a cfa register out of range is rejected by GetCfa
+    RegLocState badState(DfxRegsQut::GetQutRegsSize());
+    badState.cfaReg = regs->RegsSize() + 10; // 10 : safely out of range
+    uint16_t badErr = 0;
+    EXPECT_FALSE(DfxInstructions::Apply(memory, *regs, badState, badErr));
+
+    DfxRegsQut::qutRegs_ = savedRegs;
+    DfxRegsQut::qutRegsLocked_ = savedLocked;
+    GTEST_LOG_(INFO) << "DfxInstructionsApplyTest001: end.";
+}
+
+/**
+ * @tc.name: DwarfBadEntryTest001
+ * @tc.desc: test an invalid cie version and an overflowing fde augmentation length are rejected
+ * @tc.type: FUNC
+ */
+HWTEST_F(DwarfTest, DwarfBadEntryTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DwarfBadEntryTest001: start.";
+    // invalid cie version: the walk stops on the very first entry
+    const uintptr_t base1 = 0x60000;
+    auto badCie = BuildEhFrameImage(base1, 1, base1 + 0x1000, 0x100, false, true);
+    auto memory1 = std::make_shared<DfxIncrementMemoryTest>();
+    memory1->SetBuffer(base1, badCie);
+    DwarfEntryParserTest parser1(memory1);
+    UnwindTableInfo uti1;
+    uti1.tableData = base1;
+    uti1.tableLen = 2; // 2 : one CIE plus one FDE
+    uti1.endPc = base1 + badCie.size();
+    UnwindEntryInfo uei1;
+    const FrameDescEntry* cached1 = nullptr;
+    EXPECT_FALSE(parser1.LinearSearchEntry(base1 + 0x1040, uti1, uei1, &cached1));
+
+    // fde augmentation length that overflows the entry: the fde is rejected
+    const uintptr_t base2 = 0x68000;
+    auto badFde = BuildEhFrameImage(base2, 1, base2 + 0x1000, 0x100, false, false, true);
+    auto memory2 = std::make_shared<DfxIncrementMemoryTest>();
+    memory2->SetBuffer(base2, badFde);
+    DwarfEntryParserTest parser2(memory2);
+    UnwindTableInfo uti2;
+    uti2.tableData = base2;
+    uti2.tableLen = 2; // 2 : one CIE plus one FDE
+    uti2.endPc = base2 + badFde.size();
+    UnwindEntryInfo uei2;
+    const FrameDescEntry* cached2 = nullptr;
+    EXPECT_FALSE(parser2.LinearSearchEntry(base2 + 0x1040, uti2, uei2, &cached2));
+    GTEST_LOG_(INFO) << "DwarfBadEntryTest001: end.";
 }
 }
 } // namespace HiviewDFX

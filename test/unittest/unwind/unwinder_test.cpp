@@ -1193,6 +1193,45 @@ HWTEST_F(UnwinderTest, UnwindTest0018, TestSize.Level2)
     FUN1();
     GTEST_LOG_(INFO) << "UnwindTest0018: end.";
 }
+
+/**
+ * @tc.name: UnwindTest0019
+ * @tc.desc: test FillFrames routes dex frames and the container pid switches
+ * @tc.type: FUNC
+ */
+HWTEST_F(UnwinderTest, UnwindTest0019, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "UnwindTest0019: start.";
+    Unwinder unwinder;
+    // dex frame without a map: named "Not mapped", relPc keeps the raw pc
+    std::vector<DfxFrame> frames;
+    DfxFrame noMapFrame;
+    noMapFrame.pc = 0x5000;
+    noMapFrame.frameType = FrameType::DEX_FRAME;
+    frames.push_back(noMapFrame);
+    // dex frame with a map: elf name, pc relative to the map begin, map offset
+    auto map = std::make_shared<DfxMap>(0x7000000, 0x7001000, 0x30, PROT_READ | PROT_EXEC,
+        "/system/lib/libtest.so");
+    DfxFrame dexFrame;
+    dexFrame.pc = 0x7000040;
+    dexFrame.map = map;
+    dexFrame.frameType = FrameType::DEX_FRAME;
+    frames.push_back(dexFrame);
+    unwinder.FillFrames(frames);
+    EXPECT_EQ(frames[0].mapName, "Not mapped");
+    EXPECT_EQ(frames[0].relPc, static_cast<uint64_t>(0x5000));
+    EXPECT_EQ(frames[1].mapName, "/system/lib/libtest.so");
+    EXPECT_EQ(frames[1].relPc, static_cast<uint64_t>(0x40)); // 0x40 : pc minus map begin
+    EXPECT_EQ(frames[1].mapOffset, static_cast<uint64_t>(0x30));
+
+    // public setters only: positive different pids apply, switches stay callable
+    unwinder.SetPid(getpid());
+    unwinder.SetPid(-1);
+    unwinder.SetPid(getpid());
+    unwinder.SetIsContainerPid(true);
+    unwinder.SetIsContainerPid(false);
+    GTEST_LOG_(INFO) << "UnwindTest0019: end.";
+}
 } // namespace HiviewDFX
 } // namepsace OHOS
 
