@@ -198,5 +198,30 @@ std::string GetProcessStacktrace(size_t maxFrameNums, bool enableKernelStack, bo
     }
     return ss;
 }
+
+bool SanitizerDwarfUnwind(void** pcs, size_t maxDepth, size_t* realDepth)
+{
+    if (pcs == nullptr || maxDepth == 0 || realDepth == nullptr) {
+        if (realDepth != nullptr) {
+            *realDepth = 0;
+        }
+        return false;
+    }
+    Unwinder unwinder(true);
+    if (!unwinder.UnwindLocal(false, false, maxDepth, 0)) {
+        *realDepth = 0;
+        return false;
+    }
+    const std::vector<uintptr_t>& pcVec = unwinder.GetPcs();
+    size_t n = pcVec.size();
+    if (n > maxDepth) {
+        n = maxDepth;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        pcs[i] = reinterpret_cast<void*>(pcVec[i]);
+    }
+    *realDepth = n;
+    return n > 0;
+}
 } // namespace HiviewDFX
 } // namespace OHOS

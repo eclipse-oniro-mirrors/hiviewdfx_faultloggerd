@@ -125,6 +125,16 @@ extern "C" {
      *          For other scenarios, it is recommended to use interface of "GetBacktrace" or "PrintBacktrace".
     */
     const char* GetTrace(size_t skipFrameNum = 0, size_t maxFrameNums = DEFAULT_MAX_FRAME_NUM);
+
+    /**
+     * @brief DWARF unwind for sanitizer.
+     *
+     * @param pcs buffer used to store the unwound program counters.
+     * @param maxDepth maximum number of stack frames to unwind.
+     * @param realDepth actual number of PCs written into pcs. Set to 0 if unwinding fails.
+     * @return true if at least one PC is successfully; false otherwise.
+    */
+    bool SanitizerDwarfUnwind(void** pcs, size_t maxDepth, size_t* realDepth);
 }
 } // namespace HiviewDFX
 } // namespace OHOS
