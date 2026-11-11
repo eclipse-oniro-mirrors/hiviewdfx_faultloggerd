@@ -127,7 +127,7 @@ public:
     }
 
     // for customized
-    Impl(const std::shared_ptr<UnwindAccessors> &accessors, bool local)
+    Impl(const std::shared_ptr<UnwindAccessors> &accessors, bool local, bool needMaps)
     {
         UnwindType unwindType = local ? UNWIND_TYPE_CUSTOMIZE_LOCAL : UNWIND_TYPE_CUSTOMIZE;
         pid_ = unwindType;
@@ -137,6 +137,9 @@ public:
         pacMask_ = pacMaskDefault_;
     #endif
         memory_ = std::make_shared<DfxMemory>(unwindType, accessors);
+        if (needMaps) {
+            maps_ = DfxMaps::Create();
+        }
         Init();
     }
 
@@ -413,8 +416,8 @@ Unwinder::Unwinder(int pid, int nspid, bool crash, std::shared_ptr<DfxMaps> maps
 }
 
 // for customized
-Unwinder::Unwinder(std::shared_ptr<UnwindAccessors> accessors, bool local)
-    : impl_(std::make_shared<Impl>(accessors, local))
+Unwinder::Unwinder(std::shared_ptr<UnwindAccessors> accessors, bool local, bool needMaps)
+    : impl_(std::make_shared<Impl>(accessors, local, needMaps))
 {
 }
 
@@ -2118,7 +2121,18 @@ bool Unwinder::Impl::UnwindLocalByOtherTid(const pid_t tid, bool fast, size_t ma
         lastErrorData_.SetCode(UNW_ERROR_NOT_SUPPORT);
         return false;
     }
+    // This API passes the process level LocalThreadContextMix singleton to Unwind()/UnwindByFp()
+    // as the context. A local constructed unwinder would reinterpret that context as
+    // UnwindContext (see SetLocalStackCheck) and corrupt the singleton.
+    if ((pid_ != UNWIND_TYPE_CUSTOMIZE_LOCAL) && (pid_ != UNWIND_TYPE_CUSTOMIZE)) {
+        lastErrorData_.SetCode(UNW_ERROR_NOT_SUPPORT);
+        return false;
+    }
     auto& instance = LocalThreadContextMix::GetInstance();
+
+    if (maps_ != nullptr) {
+        instance.SetMaps(maps_);
+    }
 
     if (tid == getpid()) {
         uintptr_t stackBottom = 1;
@@ -2142,7 +2156,6 @@ bool Unwinder::Impl::UnwindLocalByOtherTid(const pid_t tid, bool fast, size_t ma
 
     bool ret = false;
     if (fast) {
-        maps_ = instance.GetMaps();
         ret = UnwindByFp(&instance, maxFrameNum, 0, true);
     } else {
         ret = Unwind(&instance, maxFrameNum, skipFrameNum);

@@ -28,6 +28,7 @@
 #include "dfx_test_util.h"
 #include "elapsed_time.h"
 #include "elf_factory.h"
+#include "thread_context.h"
 #include "unwinder.h"
 
 #if defined(__x86_64__)
@@ -876,6 +877,28 @@ HWTEST_F(UnwinderTest, UnwindLocalWithTidTest002, TestSize.Level2)
     ASSERT_FALSE(unwinder->UnwindLocalByOtherTid(gettid()));
     GTEST_LOG_(INFO) << "UnwindLocalWithTidTest002: end.";
 }
+
+/**
+ * @tc.name: UnwindLocalByOtherTidTypeGuard001
+ * @tc.desc: a local constructed unwinder must not pass the ctx type guard
+ * @tc.type: FUNC
+ */
+HWTEST_F(UnwinderTest, UnwindLocalByOtherTidTypeGuard001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "UnwindLocalByOtherTidTypeGuard001: start.";
+    // Construct a local unwinder (pid_ = UNWIND_TYPE_LOCAL, not customize).
+    // UnwindLocalByOtherTid must reject it before touching the mix singleton.
+    Unwinder unwinder;
+    pid_t otherTid = getpid(); // main thread tid is a valid other-tid for a worker thread test
+    if (otherTid == gettid()) {
+        // running on main thread: use any existing tid from /proc/self/task
+        otherTid = gettid() + 1; // even if invalid, the guard fires before the tid check
+    }
+    ASSERT_FALSE(unwinder.UnwindLocalByOtherTid(otherTid));
+    ASSERT_EQ(unwinder.GetLastErrorCode(), UNW_ERROR_NOT_SUPPORT);
+    GTEST_LOG_(INFO) << "UnwindLocalByOtherTidTypeGuard001: end.";
+}
+
 
 #if defined(__x86_64__)
 static _Unwind_Reason_Code TraceFunc(_Unwind_Context *ctx, void *d)

@@ -392,5 +392,134 @@ HWTEST(LocalThreadContextMixTest, CollectThreadContextLostWakeupStress001, testi
     ASSERT_LT(costMs, 5 * 1000); // old implementation would exceed 10s if every collect lost wakeup
 }
 
+/**
+ * @tc.name: AccessMemFromElfFileNullMaps001
+ * @tc.desc: AccessMem with null maps returns -1 on the elf file fallback path
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, AccessMemFromElfFileNullMaps001, testing::ext::TestSize.Level0)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+    constexpr uintptr_t sp = 0x10000;
+    std::vector<uint8_t> buf(STACK_BUFFER_SIZE, 0);
+    instance.SetStackForward(0);
+    instance.SetStackBuf(buf);
+    instance.SetSp(sp);
+    instance.SetMaps(nullptr); // explicitly null maps
+    uintptr_t val = 1;
+    EXPECT_EQ(instance.AccessMem(sp + STACK_BUFFER_SIZE + 0x1000, &val), -1);
+    EXPECT_EQ(val, 0);
+}
+
+/**
+ * @tc.name: AccessMemFromElfFileUnmappedAddr001
+ * @tc.desc: AccessMem with an address outside any known map returns -1
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, AccessMemFromElfFileUnmappedAddr001, testing::ext::TestSize.Level0)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+    constexpr uintptr_t sp = 0x10000;
+    std::vector<uint8_t> buf(STACK_BUFFER_SIZE, 0);
+    instance.SetStackForward(0);
+    instance.SetStackBuf(buf);
+    instance.SetSp(sp);
+    instance.SetMaps(DfxMaps::Create());
+    // Pick a high address that is unlikely to be in any valid mapping (portable across 32/64 bit)
+    uintptr_t unmappedAddr = static_cast<uintptr_t>(-1) - 0x1000ULL;
+    uintptr_t val = 1;
+    EXPECT_EQ(instance.AccessMem(unmappedAddr, &val), -1);
+    EXPECT_EQ(val, 0);
+}
+
+/**
+ * @tc.name: AccessMemFromStackBufOverflow001
+ * @tc.desc: AccessMem at the exact end boundary of the readable window
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, AccessMemFromStackBufOverflow001, testing::ext::TestSize.Level0)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+    constexpr uintptr_t sp = 0x10000;
+    std::vector<uint8_t> buf(0x10, 0); // very small buffer
+    instance.SetStackForward(0);
+    instance.SetStackBuf(buf);
+    instance.SetSp(sp);
+    instance.SetMaps(DfxMaps::Create());
+    uintptr_t val = 1;
+    // the last valid read is at buf.size() - sizeof(uintptr_t) + sp
+    EXPECT_EQ(instance.AccessMem(sp + 0x10 - sizeof(uintptr_t), &val), 0);
+    // reading at buf.size() + sp is past the buffer
+    EXPECT_EQ(instance.AccessMem(sp + 0x10, &val), -1);
+}
+
+/**
+ * @tc.name: AccessMemFromStackBufCopiedLenBoundary001
+ * @tc.desc: reads past stackCopiedLen_ but within the 64K buffer fail
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, AccessMemFromStackBufCopiedLenBoundary001, testing::ext::TestSize.Level0)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+    constexpr uintptr_t sp = 0x10000;
+    std::vector<uint8_t> buf(STACK_BUFFER_SIZE, 0);
+    instance.SetStackForward(0);
+    instance.SetStackBuf(buf);
+    // Simulate a short copy: only 0x100 bytes actually copied
+    instance.stackCopiedLen_ = 0x100;
+    instance.SetSp(sp);
+    instance.SetMaps(DfxMaps::Create());
+    uintptr_t val = 1;
+    // within the copied length
+    EXPECT_EQ(instance.AccessMem(sp + 0x80, &val), 0);
+    EXPECT_EQ(val, 0);
+    // beyond the copied length (stackOffset > stackReadableLen)
+    EXPECT_EQ(instance.AccessMem(sp + 0x100, &val), -1);
+    // well beyond the copied length
+    EXPECT_EQ(instance.AccessMem(sp + 0x200, &val), -1);
+}
+
+/**
+ * @tc.name: AccessMemFromStackBufStackForward001
+ * @tc.desc: AccessMem respects a nonzero stackForward_ window
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, AccessMemFromStackBufStackForward001, testing::ext::TestSize.Level0)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+    constexpr uintptr_t sp = 0x10000;
+    constexpr unsigned int forward = 0x100;
+    std::vector<uint8_t> buf(STACK_BUFFER_SIZE, 0);
+    // write magic below sp
+    const uint32_t magic = 0xAABBCCDD;
+    ASSERT_EQ(memcpy_s(buf.data(), buf.size(), &magic, sizeof(magic)), 0);
+    instance.SetStackForward(forward);
+    instance.SetStackBuf(buf);
+    instance.stackCopiedLen_ = forward + 0x100; // make the readable window cover [sp-forward, sp-forward+copiedLen]
+    instance.SetSp(sp);
+    instance.SetMaps(DfxMaps::Create());
+    uintptr_t val = 0;
+    // read at sp - forward + 0 (the start of the window)
+    EXPECT_EQ(instance.AccessMem(sp - forward, &val), 0);
+    EXPECT_EQ(val, static_cast<uintptr_t>(magic));
+}
+
+/**
+ * @tc.name: AccessMemNullVal001
+ * @tc.desc: AccessMem with nullptr val returns -1 without crash
+ * @tc.type: FUNC
+ */
+HWTEST(LocalThreadContextMixTest, AccessMemNullVal001, testing::ext::TestSize.Level0)
+{
+    auto& instance = LocalThreadContextMix::GetInstance();
+    instance.ReleaseCollectThreadContext();
+    EXPECT_EQ(instance.AccessMem(0x10000, nullptr), -1);
+}
+
 } // namespace HiviewDFX
 } // namepsace OHOS
