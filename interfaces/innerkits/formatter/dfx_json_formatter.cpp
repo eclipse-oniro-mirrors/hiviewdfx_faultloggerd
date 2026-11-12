@@ -22,6 +22,10 @@
 #include <thread>
 #include <sstream>
 #include <securec.h>
+#include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 #include "dfx_kernel_stack.h"
 #ifndef is_ohos_lite
 #include "dfx_frame_formatter.h"
@@ -56,6 +60,8 @@ MAYBE_UNUSED const int MAX_ALL_FRAME_PARSE_TIME_MS = 3000;
 MAYBE_UNUSED const int PARSE_SO_SYMBOL_REMAIN_TIME_MS = 5000;
 MAYBE_UNUSED const int LESS_REMAIN_TIME_MS = 500;
 constexpr const char* CONNECTION_STACK = ", out stack string:";
+constexpr int STAT_FIELD_ARG_START = 48;  // arg_start field of /proc/self/stat
+constexpr int STAT_FIELD_ARG_END = 49;    // arg_end field of /proc/self/stat
 static std::string JsonAsString(const Json::Value& val)
 {
     if (val.isConvertibleTo(Json::stringValue)) {
@@ -186,6 +192,81 @@ static int WaitProcessExitTimeout(pid_t pid, int timeoutMs)
 
 using ChildFuncType = std::function<std::string(void)>;
 
+// The kernel records the argv string area of the current process in the 48/49 fields of /proc/self/stat,
+// which is exactly the memory area referenced by /proc/<pid>/cmdline.
+bool GetArgCanvas(uintptr_t &start, uintptr_t &end)
+{
+    int fd = OHOS_TEMP_FAILURE_RETRY(open("/proc/self/stat", O_RDONLY));
+    if (fd < 0) {
+        return false;
+    }
+    char buf[2048] = {0};
+    ssize_t readLen = OHOS_TEMP_FAILURE_RETRY(read(fd, buf, sizeof(buf) - 1));
+    close(fd);
+    if (readLen <= 0) {
+        return false;
+    }
+    const char *p = strrchr(buf, ')');  // comm may contain spaces, start counting fields after the last ')'
+    if (p == nullptr) {
+        return false;
+    }
+    p++;
+    while (*p == ' ') {
+        p++;
+    }
+    while (*p != ' ' && *p != '\0') {
+        p++;  // skip the state field (field 3, a letter)
+    }
+    int field = 4;
+    while (*p != '\0' && field <= STAT_FIELD_ARG_END) {
+        while (*p == ' ') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        char *next = nullptr;
+        unsigned long long val = strtoull(p, &next, 10);
+        if (next == p) {
+            break;  // defense: stop when a non-numeric field is encountered
+        }
+        p = next;
+        if (field == STAT_FIELD_ARG_START) {
+            start = static_cast<uintptr_t>(val);
+        }
+        if (field == STAT_FIELD_ARG_END) {
+            end = static_cast<uintptr_t>(val);
+        }
+        field++;
+    }
+    return (field > STAT_FIELD_ARG_END) && (start != 0) && (end > start);
+}
+
+// Only allowed to be called in a forked child process: overwrite this process's /proc/<pid>/cmdline.
+// The canvas size is fixed at exec time (hiview is launched by init with a single argument, only 19 bytes),
+// give up safely when the name cannot fit, comm is still set by prctl.
+void SetChildCmdLine(const char *name)
+{
+    uintptr_t start = 0;
+    uintptr_t end = 0;
+    if (!GetArgCanvas(start, end)) {
+        return;
+    }
+    size_t canvas = end - start;
+    size_t len = strlen(name) + 1;  // including the trailing '\0'
+    if (len > canvas) {
+        // canvas is not enough: give up safely, avoid writing beyond arg_end
+        // (envp string is immediately after it)
+        return;
+    }
+    if (memset_s(reinterpret_cast<void *>(start), canvas, 0, canvas) != EOK) {
+        return;
+    }
+    if (memcpy_s(reinterpret_cast<void *>(start), canvas, name, len) != EOK) {
+        return;
+    }
+}
+
 static std::pair<bool, std::string> ExecuteTaskByFork(ChildFuncType func)
 {
     auto result = std::make_pair(false, std::string(""));
@@ -205,6 +286,7 @@ static std::pair<bool, std::string> ExecuteTaskByFork(ChildFuncType func)
         alarm(ALARM_TIME_S);
         DFXLOGI("start in child process.");
         prctl(PR_SET_NAME, "processdump_parser");
+        SetChildCmdLine("processdump");
         readFd.Reset();
         std::string result = func();
         ssize_t nwrite = OHOS_TEMP_FAILURE_RETRY(write(writeFd.GetFd(), result.c_str(), result.size()));
