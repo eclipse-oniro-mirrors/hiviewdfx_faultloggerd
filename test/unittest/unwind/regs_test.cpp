@@ -20,6 +20,14 @@
 #include <vector>
 #include "dfx_ptrace.h"
 #include "dfx_regs.h"
+#define private public
+#define protected public
+#include "dfx_regs_qut.h"
+#undef protected
+#undef private
+#if defined(__aarch64__)
+#include "unwind_arm64_define.h"
+#endif
 #include "dfx_test_util.h"
 
 using namespace OHOS::HiviewDFX;
@@ -372,6 +380,59 @@ HWTEST_F(DfxRegsTest, DfxRegsTest009, TestSize.Level2)
     ASSERT_TRUE(dfxRegs != nullptr);
     ASSERT_EQ(dfxRegs->GetRegsData().size(), static_cast<size_t>(dfxRegs->RegsSize()));
 }
+
+/**
+ * @tc.name: DfxRegsQutAutoTest001
+ * @tc.desc: test SetQutRegsAuto honours the explicit lock and skips equal sets
+ * @tc.type: FUNC
+ */
+#if defined(__aarch64__)
+HWTEST_F(DfxRegsTest, DfxRegsQutAutoTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxRegsQutAutoTest001: start.";
+    // preserve the global register set across the test
+    std::vector<uint16_t> saved = DfxRegsQut::GetQutRegs();
+    bool savedLocked = DfxRegsQut::qutRegsLocked_;
+
+    const std::vector<uint16_t> small = {REG_FP, REG_SP, REG_PC};
+    const std::vector<uint16_t> wide = {REG_FP, REG_SP, REG_PC, REG_LR, REG_EH};
+    // default set: same content is not reapplied
+    DfxRegsQut::qutRegsLocked_ = false;
+    DfxRegsQut::qutRegs_ = small;
+    EXPECT_FALSE(DfxRegsQut::SetQutRegsAuto(small));
+    // a different set is applied and returned
+    EXPECT_TRUE(DfxRegsQut::SetQutRegsAuto(wide));
+    EXPECT_EQ(DfxRegsQut::GetQutRegs().size(), static_cast<size_t>(5)); // 5 : wide set
+    // once locked explicitly nothing is applied anymore
+    DfxRegsQut::SetQutRegs(small);
+    EXPECT_TRUE(DfxRegsQut::qutRegsLocked_);
+    EXPECT_FALSE(DfxRegsQut::SetQutRegsAuto(wide));
+
+    DfxRegsQut::qutRegs_ = saved;
+    DfxRegsQut::qutRegsLocked_ = savedLocked;
+    GTEST_LOG_(INFO) << "DfxRegsQutAutoTest001: end.";
+}
+
+/**
+ * @tc.name: DfxRegsDexPcTest001
+ * @tc.desc: test the dex pc accessors on the regs base class
+ * @tc.type: FUNC
+ */
+HWTEST_F(DfxRegsTest, DfxRegsDexPcTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxRegsDexPcTest001: start.";
+    auto regs = std::make_shared<DfxRegsArm64>();
+    EXPECT_FALSE(regs->DexPcSeen());
+    EXPECT_EQ(regs->DexPc(), static_cast<uintptr_t>(0));
+    regs->SetDexPc(0x1234);
+    regs->SetDexPcSeen(true);
+    EXPECT_TRUE(regs->DexPcSeen());
+    EXPECT_EQ(regs->DexPc(), static_cast<uintptr_t>(0x1234));
+    regs->SetDexPcSeen(false);
+    EXPECT_FALSE(regs->DexPcSeen());
+    GTEST_LOG_(INFO) << "DfxRegsDexPcTest001: end.";
+}
+#endif
 }
 } // namespace HiviewDFX
 } // namespace OHOS

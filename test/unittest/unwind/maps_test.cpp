@@ -22,6 +22,9 @@
 #include <thread>
 #include <vector>
 
+#include <sys/wait.h>
+#include "dfx_mmap.h"
+#include "elf_craft_builder.h"
 #include "file_util.h"
 
 using namespace OHOS::HiviewDFX;
@@ -587,6 +590,180 @@ HWTEST_F(MapsTest, IsStaticArkExecutableTest001, TestSize.Level2)
     EXPECT_TRUE(interpreterMap->IsStaticArkExecutable());
 
     GTEST_LOG_(INFO) << "IsStaticArkExecutableTest001: end.";
+}
+
+/**
+ * @tc.name: FormatMapNameContainerTest001
+ * @tc.desc: test FormatMapName container and sandbox prefixes
+ * @tc.type: FUNC
+ */
+HWTEST_F(MapsTest, FormatMapNameContainerTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "FormatMapNameContainerTest001: start.";
+    // self pid is never formatted
+    std::string selfName = "/data/storage/el1/bundle/libs/arm64/libself.so";
+    DfxMap::FormatMapName(getpid(), selfName, true);
+    EXPECT_EQ(selfName, "/data/storage/el1/bundle/libs/arm64/libself.so");
+
+    const pid_t remotePid = 1234; // 1234 : fake remote pid
+    // non absolute path and /proc path are left untouched
+    std::string anonName = "[anon:ArkTS Code]";
+    DfxMap::FormatMapName(remotePid, anonName, true);
+    EXPECT_EQ(anonName, "[anon:ArkTS Code]");
+    std::string procName = "/proc/self/maps";
+    DfxMap::FormatMapName(remotePid, procName, true);
+    EXPECT_EQ(procName, "/proc/self/maps");
+
+    // container: every absolute path gets the /proc/<pid>/root prefix
+    std::string containerName = "/data/app/libtest.so";
+    DfxMap::FormatMapName(remotePid, containerName, true);
+    EXPECT_EQ(containerName, "/proc/1234/root/data/app/libtest.so");
+
+    // non container: only the sandbox path prefix is expanded
+    std::string sandboxName = "/data/storage/el1/bundle/entry/libs/arm64/libtest.so";
+    DfxMap::FormatMapName(remotePid, sandboxName, false);
+    EXPECT_EQ(sandboxName, "/proc/1234/root/data/storage/el1/bundle/entry/libs/arm64/libtest.so");
+    std::string plainName = "/data/app/libtest.so";
+    DfxMap::FormatMapName(remotePid, plainName, false);
+    EXPECT_EQ(plainName, "/data/app/libtest.so");
+    GTEST_LOG_(INFO) << "FormatMapNameContainerTest001: end.";
+}
+
+/**
+ * @tc.name: UnFormatMapNameTest001
+ * @tc.desc: test UnFormatMapName strips the /proc/<pid>/root prefix
+ * @tc.type: FUNC
+ */
+HWTEST_F(MapsTest, UnFormatMapNameTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "UnFormatMapNameTest001: start.";
+    EXPECT_EQ(DfxMap::UnFormatMapName("/proc/1234/root/data/storage/el1/bundle/libtest.so"),
+        "/data/storage/el1/bundle/libtest.so");
+    EXPECT_EQ(DfxMap::UnFormatMapName("/system/lib/libtest.so"), "/system/lib/libtest.so");
+    EXPECT_EQ(DfxMap::UnFormatMapName("/proc/self/status"), "/proc/self/status");
+    EXPECT_EQ(DfxMap::UnFormatMapName(""), "");
+    GTEST_LOG_(INFO) << "UnFormatMapNameTest001: end.";
+}
+
+/**
+ * @tc.name: IsVdsoMapTest001
+ * @tc.desc: test IsVdsoMap accepts suffixed shmm/vdso names on executable maps
+ * @tc.type: FUNC
+ */
+HWTEST_F(MapsTest, IsVdsoMapTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "IsVdsoMapTest001: start.";
+    auto plainVdso = std::make_shared<DfxMap>(0, 0x1000, 0, PROT_EXEC, "[vdso]");
+    EXPECT_TRUE(plainVdso->IsVdsoMap());
+    auto suffixedVdso = std::make_shared<DfxMap>(0, 0x1000, 0, PROT_EXEC, "name_prefix_[vdso]");
+    EXPECT_TRUE(suffixedVdso->IsVdsoMap());
+    auto suffixedShmm = std::make_shared<DfxMap>(0, 0x1000, 0, PROT_EXEC, "name_prefix_[shmm]");
+    EXPECT_TRUE(suffixedShmm->IsVdsoMap());
+    auto nonExecVdso = std::make_shared<DfxMap>(0, 0x1000, 0, PROT_READ, "[vdso]");
+    EXPECT_FALSE(nonExecVdso->IsVdsoMap());
+    auto plainLib = std::make_shared<DfxMap>(0, 0x1000, 0, PROT_EXEC, "/system/lib/libtest.so");
+    EXPECT_FALSE(plainLib->IsVdsoMap());
+    auto bareName = std::make_shared<DfxMap>(0, 0x1000, 0, PROT_EXEC, "vdso");
+    EXPECT_FALSE(bareName->IsVdsoMap());
+    GTEST_LOG_(INFO) << "IsVdsoMapTest001: end.";
+}
+
+/**
+ * @tc.name: GetElfNameApkHapTest001
+ * @tc.desc: test GetElfName keeps the container name when the inner elf has no name
+ * @tc.type: FUNC
+ */
+HWTEST_F(MapsTest, GetElfNameApkHapTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "GetElfNameApkHapTest001: start.";
+    CraftedElfOptions opt;
+    opt.withText = true;
+    auto image = ElfCraftBuilder::Build(opt);
+    auto mmap = std::make_shared<DfxMmap>();
+    ASSERT_TRUE(mmap->Init(std::move(image)));
+    auto craftedElf = std::make_shared<DfxElf>(mmap);
+    ASSERT_TRUE(craftedElf->IsValid());
+    EXPECT_TRUE(craftedElf->GetElfName().empty()); // crafted elf has no soname
+
+    auto hapMap = std::make_shared<DfxMap>(0x7000000, 0x7001000, 0, PROT_READ, "/data/app/el1/bundle/test.hap");
+    hapMap->elf = craftedElf;
+    EXPECT_EQ(hapMap->GetElfName(), "/data/app/el1/bundle/test.hap");
+
+    auto apkMap = std::make_shared<DfxMap>(0x7001000, 0x7002000, 0, PROT_READ, "/data/app/el1/bundle/test.apk");
+    apkMap->elf = craftedElf;
+    EXPECT_EQ(apkMap->GetElfName(), "/data/app/el1/bundle/test.apk");
+
+    auto emptyMap = std::make_shared<DfxMap>(0x7002000, 0x7003000, 0, PROT_READ, "");
+    EXPECT_EQ(emptyMap->GetElfName(), "");
+
+    auto noElfMap = std::make_shared<DfxMap>(0x7003000, 0x7004000, 0, PROT_READ, "/data/app/el1/bundle/none.hap");
+    noElfMap->elf = nullptr;
+    // no readable file behind this map: GetElf fails and the name is kept as is
+    EXPECT_EQ(noElfMap->GetElfName(), "/data/app/el1/bundle/none.hap");
+    GTEST_LOG_(INFO) << "GetElfNameApkHapTest001: end.";
+}
+
+/**
+ * @tc.name: IsLegalMapItemMemfdTest001
+ * @tc.desc: test IsLegalMapItem accepts memfd names and rejects special files
+ * @tc.type: FUNC
+ */
+HWTEST_F(MapsTest, IsLegalMapItemMemfdTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "IsLegalMapItemMemfdTest001: start.";
+    EXPECT_TRUE(DfxMaps::IsLegalMapItem("/memfd:jit-zygote-cache (deleted)"));
+    EXPECT_TRUE(DfxMaps::IsLegalMapItem("/system/lib/x[vdso]"));
+    EXPECT_TRUE(DfxMaps::IsLegalMapItem("libplainname.so"));
+    EXPECT_FALSE(DfxMaps::IsLegalMapItem(""));
+    EXPECT_FALSE(DfxMaps::IsLegalMapItem("/dev/dri/renderD0"));
+    EXPECT_FALSE(DfxMaps::IsLegalMapItem("/system/fonts/font.ttf"));
+    GTEST_LOG_(INFO) << "IsLegalMapItemMemfdTest001: end.";
+}
+
+/**
+ * @tc.name: ContainerMapsCreateTest001
+ * @tc.desc: test the container maps creation prefixes names with /proc/<pid>/root
+ * @tc.type: FUNC
+ */
+HWTEST_F(MapsTest, ContainerMapsCreateTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ContainerMapsCreateTest001: start.";
+    int fds[2];
+    ASSERT_EQ(pipe(fds), 0);
+    pid_t child = fork();
+    if (child == 0) {
+        close(fds[1]);
+        char c;
+        while (read(fds[0], &c, sizeof(c)) < 0 && errno == EINTR) {
+        }
+        _exit(0);
+    }
+    close(fds[0]);
+
+    auto containerMaps = DfxMaps::Create(child, true, true, true);
+    ASSERT_NE(containerMaps, nullptr);
+    bool hasPrefix = false;
+    for (const auto& map : containerMaps->GetMaps()) {
+        if (map != nullptr && !map->name.empty() && map->name[0] == '/' &&
+            DfxMap::UnFormatMapName(map->name) != map->name) {
+            hasPrefix = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(hasPrefix);
+
+    auto plainMaps = DfxMaps::Create(child, true, true);
+    ASSERT_NE(plainMaps, nullptr);
+    for (const auto& map : plainMaps->GetMaps()) {
+        if (map != nullptr && !map->name.empty()) {
+            EXPECT_EQ(map->name.find("/proc/"), std::string::npos);
+        }
+    }
+
+    close(fds[1]);
+    int status = 0;
+    waitpid(child, &status, 0);
+    GTEST_LOG_(INFO) << "ContainerMapsCreateTest001: end.";
 }
 }
 } // namespace HiviewDFX
