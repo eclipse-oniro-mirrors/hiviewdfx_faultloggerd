@@ -14,6 +14,9 @@
  */
 
 #include <vector>
+#include <cstring>
+#include <link.h>
+#include <memory>
 #include <gtest/gtest.h>
 #include <securec.h>
 
@@ -30,6 +33,41 @@ namespace HiviewDFX {
 #define MIN_FRAME_NUM 2
 
 class FpBacktraceTest : public testing::Test {};
+
+#if is_ohos && !is_mingw && (defined(__aarch64__) || defined(__x86_64__))
+static int FindArkRuntime(struct dl_phdr_info* info, size_t size, void* data)
+{
+    (void)size;
+    (void)data;
+    return std::strstr(info->dlpi_name, "libark_jsruntime.so") != nullptr;
+}
+
+/**
+ * @tc.name: FpBacktraceDlsymOnly
+ * @tc.desc: Native and first-frame fallback unwinding must not load Ark; legacy initialization still can.
+ * @tc.type: FUNC
+ */
+HWTEST_F(FpBacktraceTest, FpBacktraceDlsymOnly, TestSize.Level2)
+{
+    if (dl_iterate_phdr(FindArkRuntime, nullptr) != 0) {
+        GTEST_SKIP() << "Run this case in a fresh process without the Ark runtime";
+    }
+    std::unique_ptr<FpBacktrace> backtrace(FpBacktrace::CreateInstance(false));
+    ASSERT_NE(backtrace, nullptr);
+    EXPECT_EQ(dl_iterate_phdr(FindArkRuntime, nullptr), 0);
+    void* pcs[DEFAULT_MAX_FRAME_NUM]{};
+    EXPECT_GT(backtrace->BacktraceFromFp(__builtin_frame_address(0), pcs, DEFAULT_MAX_FRAME_NUM), 0);
+    constexpr size_t frameWords = 2;
+    uintptr_t invalidFrame[frameWords]{};
+    EXPECT_EQ(backtrace->BacktraceFromFp(invalidFrame, pcs, DEFAULT_MAX_FRAME_NUM), 0);
+    EXPECT_EQ(dl_iterate_phdr(FindArkRuntime, nullptr), 0);
+
+    std::unique_ptr<FpBacktrace> legacy(FpBacktrace::CreateInstance());
+    ASSERT_NE(legacy, nullptr);
+    EXPECT_NE(dl_iterate_phdr(FindArkRuntime, nullptr), 0);
+    EXPECT_EQ(backtrace->BacktraceFromFp(invalidFrame, pcs, DEFAULT_MAX_FRAME_NUM), 0);
+}
+#endif
 
 __attribute__((optimize("no-omit-frame-pointer"), optnone, noinline)) void FUN3()
 {

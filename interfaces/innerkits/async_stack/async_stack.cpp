@@ -430,7 +430,7 @@ void DfxSetAsyncStackCallback()
 }
 #endif
 
-bool DfxInitAsyncStackWithDebug(bool isDebugApp)
+static bool InitAsyncStack(bool isDebugApp, [[maybe_unused]] bool allowArkDlopen)
 {
 #if defined(__aarch64__)
     // init unique stack table
@@ -443,7 +443,8 @@ bool DfxInitAsyncStackWithDebug(bool isDebugApp)
         DFXLOGE("failed to create key for stackId.");
         return false;
     }
-    g_fpBacktrace = std::unique_ptr<OHOS::HiviewDFX::FpBacktrace>(OHOS::HiviewDFX::FpBacktrace::CreateInstance());
+    g_fpBacktrace = std::unique_ptr<OHOS::HiviewDFX::FpBacktrace>(
+        OHOS::HiviewDFX::FpBacktrace::CreateInstance(allowArkDlopen));
     g_sampleMode.store(GetSampleMode(isDebugApp));
     DFXLOGI("Init async stack, sample mode: %{public}d", static_cast<int>(g_sampleMode.load()));
     DfxSetAsyncStackCallback(isDebugApp);
@@ -452,12 +453,17 @@ bool DfxInitAsyncStackWithDebug(bool isDebugApp)
     return g_init.load();
 }
 
+bool DfxInitAsyncStackWithDebug(bool isDebugApp)
+{
+    return InitAsyncStack(isDebugApp, false);
+}
+
 bool DfxInitAsyncStack()
 {
 #if defined(__aarch64__)
-    return DfxInitAsyncStackWithDebug(IsDebuggableApp());
+    return InitAsyncStack(IsDebuggableApp(), true);
 #else
-    return DfxInitAsyncStackWithDebug(false);
+    return InitAsyncStack(false, true);
 #endif
 }
 
