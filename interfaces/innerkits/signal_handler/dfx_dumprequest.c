@@ -408,8 +408,9 @@ static void RestoreDumpState(bool isTracerStatusModified, int signo)
 
 static int WaitProcessExitTimeout(pid_t pid, int timeoutMs, bool isPrvi)
 {
-    int status = 1; // abnomal exit code
-    while (timeoutMs > 0) {
+    int status = 1; // abnormal exit code
+    uint64_t deadline = GetAbsTimeMilliSecondsCInterce() + (uint64_t)timeoutMs;
+    while (true) {
         int res = waitpid(pid, &status, WNOHANG);
         if (res > 0) {
             break;
@@ -417,15 +418,14 @@ static int WaitProcessExitTimeout(pid_t pid, int timeoutMs, bool isPrvi)
             DFXLOGE("failed to wait dummy, error(%{public}d)", errno);
             break;
         }
-        SafeDelayOneMillSec();
-        timeoutMs--;
-        if (timeoutMs == 0) {
+        if (GetAbsTimeMilliSecondsCInterce() >= deadline) {
             DFXLOGI("waitpid %{public}d timeout", pid);
             if (!isPrvi) {
                 FillCrashExceptionAndReport(CRASH_SIGNAL_EWAITPIDTIMEOUT);
             }
             return PROCESS_ABNORMAL_EXIT;
         }
+        SafeDelayOneMillSec();
     }
     if (WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM) {
         DFXLOGE("dummy exit with signal(%{public}d)", WTERMSIG(status));
