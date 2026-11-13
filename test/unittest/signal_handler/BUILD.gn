@@ -155,6 +155,40 @@ if (defined(ohos_lite)) {
     ]
   }
 
+  ohos_unittest("test_dumprequest_waitpid") {
+    module_out_path = module_output_path
+    configs = [
+      ":module_test_signal_config",
+      "$faultloggerd_path/common/build:coverage_flags",
+    ]
+    defines = [ "DFX_LOG_HILOG_BASE" ]
+
+    cflags_cc = [ "-Wno-free-nonheap-object" ]
+    sources = [
+      "dumprequest_waitpid_test.cpp",
+      "dumprequest_waitpid_test_c.c",
+    ]
+    sources += [
+      "$faultloggerd_interfaces_path/innerkits/signal_handler/dfx_signalhandler_exception.c",
+      "$faultloggerd_interfaces_path/innerkits/signal_handler/dfx_lite_dump_request.c",
+      "$faultloggerd_interfaces_path/innerkits/signal_handler/safe_reader.c",
+    ]
+
+    deps = [
+      "$faultloggerd_frameworks_path/allocator:dfx_allocator_src",
+      "$faultloggerd_path/common/cutil:dfx_cutil",
+      "$faultloggerd_path/test/utils:dfx_test_util",
+      "$faultloggerd_frameworks_path/limited:dfx_limited_src",
+    ]
+
+    external_deps = [
+      "bounds_checking_function:libsec_shared",
+      "c_utils:utils",
+      "googletest:gtest_main",
+      "hilog:libhilog_snapshot",
+    ]
+  }
+
   group("unittest") {
     testonly = true
     deps = [
@@ -162,6 +196,7 @@ if (defined(ohos_lite)) {
       ":test_safe_reader",
       ":test_signalchain",
       ":test_signalhandler",
+      ":test_dumprequest_waitpid",
     ]
   }
 }
