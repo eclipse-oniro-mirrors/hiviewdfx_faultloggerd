@@ -215,7 +215,6 @@ DfxAsyncContext* DfxAsyncContextPool::AcquireAndInitAsyncContext(
         return nullptr;
     }
     if (freeListHead_ == freeListTail_) {
-        DFXLOGW("DfxAsyncContext exhausted");
         return nullptr;
     }
     DfxAsyncContext* ctx = freeListHead_;
@@ -498,7 +497,6 @@ DfxAsyncContext* DfxAsyncContextManager::HandleCollectAsyncStack(uint64_t stackI
     DfxAsyncContext* ctx =
         DfxAsyncContextPool::Instance()->AcquireAndInitAsyncContext(threadCtx, stackId, asyncType);
     if (ctx == nullptr) {
-        DFXLOGW("HandleCollectAsyncStack acquire async context failed");
         return nullptr;
     }
     return ctx;
