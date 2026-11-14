@@ -89,7 +89,7 @@ void MinidumpDumper::CollectDumpHeaderInfo(int pid)
     request_.timeStamp = GetTimeMilliSeconds();
     request_.pid = pid;
     request_.nsPid = pid;
-    request_.uid = 0;
+    request_.uid = UINT32_MAX;
     long uid = 0;
     uint64_t sigBlk = 0;
     if (GetUidAndSigBlk(pid, uid, sigBlk) && uid > 0) {
@@ -602,7 +602,7 @@ void MinidumpDumper::PrintHeader()
 
     headInfo += StringPrintf("Pid:%d\n", request_.pid);
     CppCrashInfoCollector::Instance().SetPid(request_.pid);
-    headInfo += StringPrintf("Uid:%d\n", request_.uid);
+    headInfo += StringPrintf("Uid:%u\n", request_.uid);
     CppCrashInfoCollector::Instance().SetUid(request_.uid);
     headInfo += StringPrintf("Process name:%s\n", request_.processName);
     CppCrashInfoCollector::Instance().SetPname(request_.processName);

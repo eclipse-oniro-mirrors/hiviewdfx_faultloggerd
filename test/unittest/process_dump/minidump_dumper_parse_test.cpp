@@ -50,7 +50,7 @@ HWTEST_F(MinidumpDumperTest, MinidumpDumperTest032, TestSize.Level2)
     dumper.CollectDumpHeaderInfo(getpid());
     dumper.PrintHeader();
     EXPECT_EQ(CppCrashInfoCollector::Instance().GetPid(), getpid());
-    EXPECT_EQ(CppCrashInfoCollector::Instance().GetUid(), getuid());
+    EXPECT_EQ(CppCrashInfoCollector::Instance().GetUid(), UINT32_MAX);
     std::string pname = CppCrashInfoCollector::Instance().GetPname();
     EXPECT_EQ(pname, std::string(dumper.request_.processName));
 }

@@ -33,7 +33,7 @@ struct HeadInfo {
     std::string buildInfo;
     std::string timestamp;
     int32_t pid {0};
-    int32_t uid {0};
+    uint32_t uid {0};
     std::string hiTraceId;
     std::string pname;
     std::string lifeTime;
@@ -65,7 +65,7 @@ public:
     void SetBuildInfo(const std::string& buildInfo);
     void SetTimestamp(const std::string& timestamp);
     void SetPid(int32_t pid);
-    void SetUid(int32_t uid);
+    void SetUid(uint32_t uid);
     void SetHiTraceId(const std::string& hiTraceId);
     void SetPname(const std::string& pname);
     void SetProcessLifeTime(const std::string& lifeTime);
@@ -96,7 +96,7 @@ public:
     const std::string& GetBuildInfo() const;
     const std::string& GetTimestamp() const;
     int32_t GetPid() const;
-    int32_t GetUid() const;
+    uint32_t GetUid() const;
     const std::string& GetHiTraceId() const;
     const std::string& GetPname() const;
     const std::string& GetProcessLifeTime() const;

@@ -257,6 +257,7 @@ bool GetUidAndSigBlk(pid_t pid, long& uid, uint64_t& sigBlk)
     std::string procPath = "/proc/" + std::to_string(pid) + "/task/" + std::to_string(pid) + "/status";
     FILE *fp = fopen(procPath.c_str(), "r");
     if (fp == nullptr) {
+        DFXLOGE("fopen failed errno(%{public}d)", errno);
         return false;
     }
     char line[256] = {0}; // 256 : read status line is enough
@@ -272,7 +273,6 @@ bool GetUidAndSigBlk(pid_t pid, long& uid, uint64_t& sigBlk)
         }
     }
     (void)fclose(fp);
-
     if (uidStr.empty() || sigBlkStr.empty()) {
         return false;
     }

@@ -48,7 +48,7 @@ void CppCrashInfoCollector::SetPid(int32_t pid)
     headInfo_.pid = pid;
 }
 
-void CppCrashInfoCollector::SetUid(int32_t uid)
+void CppCrashInfoCollector::SetUid(uint32_t uid)
 {
     if (!needFormatFlag_) {
         return;
@@ -278,7 +278,7 @@ int32_t CppCrashInfoCollector::GetPid() const
     return headInfo_.pid;
 }
 
-int32_t CppCrashInfoCollector::GetUid() const
+uint32_t CppCrashInfoCollector::GetUid() const
 {
     return headInfo_.uid;
 }
