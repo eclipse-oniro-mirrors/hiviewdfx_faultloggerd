@@ -541,7 +541,7 @@ bool DfxElf::FillUnwindTableByEhhdr(struct DwarfEhFrameHdr* hdr, uintptr_t shdrB
     DFXLOGU("[%{public}d]: gp: %{public}" PRIx64 ", ehFramePtrEnc: %{public}x, fdeCountEnc: %{public}x", __LINE__,
         (uint64_t)uti->gp, hdr->ehFramePtrEnc, hdr->fdeCountEnc);
     mmap_->SetDataOffset(uti->gp);
-    auto ptrOffset = ptr - reinterpret_cast<uintptr_t>(GetMmapPtr());
+    auto ptrOffset = ptr - mmap_->GetVirtualBase();
     MAYBE_UNUSED uintptr_t ehFrameStart = mmap_->ReadEncodedValue(ptrOffset, hdr->ehFramePtrEnc);
     uintptr_t fdeCount = mmap_->ReadEncodedValue(ptrOffset, hdr->fdeCountEnc);
     // Sanity check: reject absurdly large fdeCount that would cause out-of-bounds
@@ -553,7 +553,7 @@ bool DfxElf::FillUnwindTableByEhhdr(struct DwarfEhFrameHdr* hdr, uintptr_t shdrB
     }
     DFXLOGU("[%{public}d]: ehFrameStart: %{public}" PRIx64 ", fdeCount: %{public}d", __LINE__,
         (uint64_t)ehFrameStart, (int)fdeCount);
-    ptr = reinterpret_cast<uintptr_t>(GetMmapPtr()) + ptrOffset;
+    ptr = mmap_->GetVirtualBase() + ptrOffset;
 
     if (hdr->tableEnc != (DW_EH_PE_datarel | DW_EH_PE_sdata4)) {
         DFXLOGU("[%{public}d]: tableEnc: %{public}x", __LINE__, hdr->tableEnc);
@@ -605,7 +605,13 @@ struct DwarfEhFrameHdr* DfxElf::GetEhFrameHdr(const ShdrInfo& shdr, uint64_t mma
         return nullptr;
     }
     INSTR_STATISTIC(InstructionEntriesEhFrame, shdr.size, 0);
-    return (struct DwarfEhFrameHdr *) (shdr.offset + (char *)GetMmapPtr());
+    const uint8_t* resident = (mmap_ != nullptr) ?
+        mmap_->GetResidentPtr(static_cast<uintptr_t>(shdr.offset), static_cast<size_t>(shdr.size)) : nullptr;
+    if (resident == nullptr) {
+        DFXLOGE("[%{public}d]: Failed to get resident .eh_frame_hdr", __LINE__);
+        return nullptr;
+    }
+    return (struct DwarfEhFrameHdr *)resident;
 }
 
 struct DwarfEhFrameHdr* DfxElf::SynthEhFrameHdr(struct DwarfEhFrameHdr& synthHdr,
@@ -625,7 +631,13 @@ struct DwarfEhFrameHdr* DfxElf::SynthEhFrameHdr(struct DwarfEhFrameHdr& synthHdr
         ((sizeof(ElfW(Addr)) == sizeof(uint32_t)) ? DW_EH_PE_udata4 : DW_EH_PE_udata8);
     synthHdr.fdeCountEnc = DW_EH_PE_omit;
     synthHdr.tableEnc = DW_EH_PE_omit;
-    synthHdr.ehFrame = (ElfW(Addr))(shdr.offset + (char*)GetMmapPtr());
+    const uint8_t* resident = (mmap_ != nullptr) ?
+        mmap_->GetResidentPtr(static_cast<uintptr_t>(shdr.offset), static_cast<size_t>(shdr.size)) : nullptr;
+    if (resident == nullptr) {
+        DFXLOGE("[%{public}d]: Failed to get resident .eh_frame", __LINE__);
+        return nullptr;
+    }
+    synthHdr.ehFrame = (ElfW(Addr))resident;
     return &synthHdr;
 }
 
@@ -650,11 +662,11 @@ bool DfxElf::FillUnwindTableByEhFrame(ShdrInfo& shdr, uintptr_t loadBase,
     struct DwarfEhFrameHdr synthHdr;
     struct DwarfEhFrameHdr* hdr = nullptr;
     uint64_t mmapSize = GetMmapSize();
-    if (GetSectionInfo(shdr, EH_FRAME_HDR) && GetMmapPtr() != nullptr) {
+    if (GetSectionInfo(shdr, EH_FRAME_HDR)) {
         hdr = GetEhFrameHdr(shdr, mmapSize);
-    } else if (GetSectionInfo(shdr, EH_FRAME) && GetMmapPtr() != nullptr) {
+    } else if (GetSectionInfo(shdr, EH_FRAME)) {
         hdr = SynthEhFrameHdr(synthHdr, shdr, mmapSize, mapName);
-    } else if (GetSectionInfo(shdr, DEBUG_FRAME) && GetMmapPtr() != nullptr) {
+    } else if (GetSectionInfo(shdr, DEBUG_FRAME) && mmap_ != nullptr) {
         return FillUnwindTableByDebugFrame(shdr, loadBase, mmap_, uti);
     } else if (IsMiniDebugInfoValid() && miniDebugInfo_->GetSectionInfo(shdr, DEBUG_FRAME)) {
         return FillUnwindTableByDebugFrame(shdr, loadBase, miniDebugInfo_->GetMmap(), uti);

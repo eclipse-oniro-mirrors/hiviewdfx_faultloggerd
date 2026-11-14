@@ -224,6 +224,410 @@ HWTEST_F(ElfFactoryTest, ElfFactoryTest008, TestSize.Level2)
     ASSERT_TRUE(elf == nullptr);
     GTEST_LOG_(INFO) << "ElfFactoryTest008: end.";
 }
+
+/**
+ * @tc.name: ElfFactoryTest009_MiniDebugInfo
+ * @tc.desc: test BuildChunkIndex produces monotonic block index
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest009_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest009_MiniDebugInfo: start.";
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    RegularElfFactory regularElfFactory(DUMPCATCHER_ELF_FILE);
+    auto elf = regularElfFactory.Create();
+    ASSERT_TRUE(elf->IsValid());
+    auto gnuDebugDataHdr = elf->GetGnuDebugDataHdr();
+    ASSERT_TRUE(gnuDebugDataHdr.size != 0);
+    MiniDebugInfoFactory miniDebugInfoFactory(gnuDebugDataHdr);
+    auto src = reinterpret_cast<const uint8_t *>(gnuDebugDataHdr.address);
+    ChunkIndex idx = miniDebugInfoFactory.BuildChunkIndex(src, gnuDebugDataHdr.size);
+    ASSERT_FALSE(idx.entries.empty());
+    ASSERT_EQ(idx.entries[0].dstOff, 0ULL);
+    for (size_t i = 1; i < idx.entries.size(); ++i) {
+        ASSERT_GT(idx.entries[i].dstOff, idx.entries[i - 1].dstOff);
+        ASSERT_EQ(idx.entries[i - 1].dstOff + idx.entries[i - 1].unpackSize, idx.entries[i].dstOff);
+    }
+    GTEST_LOG_(INFO) << "ElfFactoryTest009_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest010_MiniDebugInfo
+ * @tc.desc: test BlockProvider block-by-block decompression yields valid ELF
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest010_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest010_MiniDebugInfo: start.";
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    RegularElfFactory regularElfFactory(DUMPCATCHER_ELF_FILE);
+    auto elf = regularElfFactory.Create();
+    ASSERT_TRUE(elf->IsValid());
+    auto gnuDebugDataHdr = elf->GetGnuDebugDataHdr();
+    ASSERT_TRUE(gnuDebugDataHdr.size != 0);
+    MiniDebugInfoFactory miniDebugInfoFactory(gnuDebugDataHdr);
+    auto src = reinterpret_cast<const uint8_t *>(gnuDebugDataHdr.address);
+    ChunkIndex idx = miniDebugInfoFactory.BuildChunkIndex(src, gnuDebugDataHdr.size);
+    ASSERT_FALSE(idx.entries.empty());
+    BlockProvider provider(src, gnuDebugDataHdr.size, ChunkIndex{idx});
+    std::vector<uint8_t> fullOut;
+    for (const auto& blk : idx.entries) {
+        std::vector<uint8_t> blockOut;
+        ASSERT_TRUE(provider.DecompressBlock(blk, blockOut));
+        fullOut.insert(fullOut.end(), blockOut.begin(), blockOut.end());
+    }
+    ASSERT_FALSE(fullOut.empty());
+    constexpr uint8_t elfMagic0 = 0x7f;
+    ASSERT_EQ(fullOut[0], elfMagic0);
+    ASSERT_EQ(fullOut[1], 'E');
+    ASSERT_EQ(fullOut[2], 'L');
+    ASSERT_EQ(fullOut[3], 'F');
+    GTEST_LOG_(INFO) << "ElfFactoryTest010_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest011_MiniDebugInfo
+ * @tc.desc: test block-by-block decompression bytes equal to full XzDecompress (AC-01)
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest011_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest011_MiniDebugInfo: start.";
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    RegularElfFactory regularElfFactory(DUMPCATCHER_ELF_FILE);
+    auto elf = regularElfFactory.Create();
+    ASSERT_TRUE(elf->IsValid());
+    auto gnuDebugDataHdr = elf->GetGnuDebugDataHdr();
+    ASSERT_TRUE(gnuDebugDataHdr.size != 0);
+    MiniDebugInfoFactory miniDebugInfoFactory(gnuDebugDataHdr);
+    auto src = reinterpret_cast<const uint8_t *>(gnuDebugDataHdr.address);
+    size_t srcLen = gnuDebugDataHdr.size;
+
+    std::vector<uint8_t> fullOut;
+    ASSERT_TRUE(miniDebugInfoFactory.XzDecompress(src, srcLen, fullOut));
+    ASSERT_FALSE(fullOut.empty());
+
+    ChunkIndex idx = miniDebugInfoFactory.BuildChunkIndex(src, srcLen);
+    ASSERT_FALSE(idx.entries.empty());
+    ASSERT_EQ(idx.entries[0].dstOff, 0ULL);
+    for (size_t i = 1; i < idx.entries.size(); ++i) {
+        ASSERT_EQ(idx.entries[i - 1].dstOff + idx.entries[i - 1].unpackSize, idx.entries[i].dstOff);
+    }
+    BlockProvider provider(src, srcLen, ChunkIndex{idx});
+    std::vector<uint8_t> segOut;
+    for (const auto& blk : idx.entries) {
+        std::vector<uint8_t> blockOut;
+        ASSERT_TRUE(provider.DecompressBlock(blk, blockOut));
+        segOut.insert(segOut.end(), blockOut.begin(), blockOut.end());
+    }
+    ASSERT_EQ(segOut.size(), fullOut.size());
+    EXPECT_EQ(memcmp(segOut.data(), fullOut.data(), fullOut.size()), 0);
+    GTEST_LOG_(INFO) << "ElfFactoryTest011_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest012_MiniDebugInfo
+ * @tc.desc: test Create adaptive path returns valid elf with symbols (AC-04)
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest012_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest012_MiniDebugInfo: start.";
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    RegularElfFactory regularElfFactory(DUMPCATCHER_ELF_FILE);
+    auto elf = regularElfFactory.Create();
+    ASSERT_TRUE(elf->IsValid());
+    auto gnuDebugDataHdr = elf->GetGnuDebugDataHdr();
+    ASSERT_TRUE(gnuDebugDataHdr.size != 0);
+    auto src = reinterpret_cast<const uint8_t *>(gnuDebugDataHdr.address);
+    MiniDebugInfoFactory miniDebugInfoFactory(gnuDebugDataHdr);
+    ChunkIndex idx = miniDebugInfoFactory.BuildChunkIndex(src, gnuDebugDataHdr.size);
+    GTEST_LOG_(INFO) << "block count: " << idx.entries.size();
+    auto mini = miniDebugInfoFactory.Create();
+    ASSERT_TRUE(mini != nullptr);
+    ASSERT_TRUE(mini->IsValid());
+    std::vector<DfxSymbol> symbols;
+    DfxSymbols::ParseSymbols(symbols, mini, "");
+    ASSERT_GT(symbols.size(), 0);
+    GTEST_LOG_(INFO) << "ElfFactoryTest012_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest013_MiniDebugInfo
+ * @tc.desc: test Create fallback on corrupt input returns nullptr (AC-04)
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest013_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest013_MiniDebugInfo: start.";
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    std::vector<uint8_t> corrupt(64, 0xAA);
+    GnuDebugDataHdr hdr;
+    hdr.address = reinterpret_cast<uintptr_t>(corrupt.data());
+    hdr.size = static_cast<uintptr_t>(corrupt.size());
+    MiniDebugInfoFactory miniDebugInfoFactory(hdr);
+    auto mini = miniDebugInfoFactory.Create();
+    EXPECT_EQ(mini, nullptr);
+    GTEST_LOG_(INFO) << "ElfFactoryTest013_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest014_MiniDebugInfo
+ * @tc.desc: test Create preserves enableLoadSymbolLazily switch semantics (AC-04)
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest014_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest014_MiniDebugInfo: start.";
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    RegularElfFactory regularElfFactory(DUMPCATCHER_ELF_FILE);
+    auto elf = regularElfFactory.Create();
+    ASSERT_TRUE(elf->IsValid());
+    auto gnuDebugDataHdr = elf->GetGnuDebugDataHdr();
+    ASSERT_TRUE(gnuDebugDataHdr.size != 0);
+    for (bool lazy : { false, true }) {
+        UnwinderConfig::SetEnableLoadSymbolLazily(lazy);
+        MiniDebugInfoFactory miniDebugInfoFactory(gnuDebugDataHdr);
+        auto mini = miniDebugInfoFactory.Create();
+        ASSERT_TRUE(mini != nullptr);
+        ASSERT_TRUE(mini->IsValid());
+    }
+    UnwinderConfig::SetEnableLoadSymbolLazily(false);
+    GTEST_LOG_(INFO) << "ElfFactoryTest014_MiniDebugInfo: end.";
+}
+namespace {
+// Loads the real dumpcatcher minidebuginfo together with its block index.
+// elf must be kept alive: it owns the mmap backing src, which the block provider
+// dereferences lazily during the tests.
+struct MiniInput {
+    std::shared_ptr<DfxElf> elf;
+    const uint8_t *src = nullptr;
+    size_t srcLen = 0;
+    ChunkIndex idx;
+};
+
+bool LoadMiniInput(MiniInput &in)
+{
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    RegularElfFactory regularElfFactory(DUMPCATCHER_ELF_FILE);
+    auto elf = regularElfFactory.Create();
+    if (elf == nullptr || !elf->IsValid()) {
+        return false;
+    }
+    GnuDebugDataHdr hdr = elf->GetGnuDebugDataHdr();
+    if (hdr.size == 0) {
+        return false;
+    }
+    in.elf = elf;
+    in.src = reinterpret_cast<const uint8_t *>(hdr.address);
+    in.srcLen = static_cast<size_t>(hdr.size);
+    MiniDebugInfoFactory factory(hdr);
+    in.idx = factory.BuildChunkIndex(in.src, in.srcLen);
+    return !in.idx.entries.empty();
+}
+
+// xz stream tail layout: [blocks][Stream Index][Stream Footer(XZ_FOOTER_SIZE)] where the
+// footer is CRC32(4) | Backward Size(4) | Stream Flags(2) | "YZ"(2) and Backward Size
+// stores (index size / XZ_INDEX_SIZE_UNIT) - 1.
+constexpr size_t XZ_FOOTER_SIZE = 12;
+constexpr size_t XZ_FOOTER_BACKWARD_OFFSET = 4;
+constexpr size_t XZ_INDEX_SIZE_UNIT = 4;
+
+size_t XzIndexStart(const std::vector<uint8_t> &raw)
+{
+    uint32_t backward = 0;
+    size_t off = raw.size() - XZ_FOOTER_SIZE + XZ_FOOTER_BACKWARD_OFFSET;
+    if (memcpy_s(&backward, sizeof(backward), raw.data() + off, sizeof(backward)) != 0) {
+        return raw.size();
+    }
+    size_t indexSize = (static_cast<size_t>(backward) + 1) * XZ_INDEX_SIZE_UNIT;
+    return raw.size() - XZ_FOOTER_SIZE - indexSize;
+}
+
+ChunkBlk MakeBlk(uint64_t dstOff, uint64_t unpackSize)
+{
+    ChunkBlk blk;
+    blk.dstOff = dstOff;
+    blk.packOff = 0;
+    blk.unpackSize = unpackSize;
+    blk.packSize = 0;
+    return blk;
+}
+} // namespace
+
+/**
+ * @tc.name: ElfFactoryTest020_MiniDebugInfo
+ * @tc.desc: test BuildChunkIndex rejects corrupted xz streams and Create falls back (BR-04)
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest020_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest020_MiniDebugInfo: start.";
+    MiniInput in;
+    ASSERT_TRUE(LoadMiniInput(in));
+    GnuDebugDataHdr hdr;
+    hdr.address = reinterpret_cast<uintptr_t>(in.src);
+    hdr.size = static_cast<uintptr_t>(in.srcLen);
+    MiniDebugInfoFactory factory(hdr);
+    std::vector<uint8_t> raw;
+
+    // footer signature corrupted: the "YZ" magic is no longer at the stream tail
+    raw.assign(in.src, in.src + in.srcLen);
+    raw[raw.size() - 1] = 0;
+    EXPECT_TRUE(factory.BuildChunkIndex(raw.data(), raw.size()).entries.empty());
+
+    // backward size claims an index reaching far beyond the stream
+    raw.assign(in.src, in.src + in.srcLen);
+    constexpr uint32_t hugeBackward = 0xFFFFFFFF;
+    if (memcpy_s(raw.data() + raw.size() - XZ_FOOTER_SIZE + XZ_FOOTER_BACKWARD_OFFSET,
+        sizeof(hugeBackward), &hugeBackward, sizeof(hugeBackward)) != 0) {
+        ASSERT_TRUE(false);
+    }
+    EXPECT_TRUE(factory.BuildChunkIndex(raw.data(), raw.size()).entries.empty());
+
+    // stream index indicator corrupted (must be 0x00)
+    raw.assign(in.src, in.src + in.srcLen);
+    raw[XzIndexStart(raw)] = 1;
+    EXPECT_TRUE(factory.BuildChunkIndex(raw.data(), raw.size()).entries.empty());
+
+    // record count of zero
+    raw.assign(in.src, in.src + in.srcLen);
+    raw[XzIndexStart(raw) + 1] = 0;
+    EXPECT_TRUE(factory.BuildChunkIndex(raw.data(), raw.size()).entries.empty());
+
+    // truncated stream: the footer no longer sits at the tail
+    std::vector<uint8_t> trunc(in.src, in.src + in.srcLen - XZ_FOOTER_SIZE);
+    EXPECT_TRUE(factory.BuildChunkIndex(trunc.data(), trunc.size()).entries.empty());
+
+    // null or undersized input
+    EXPECT_TRUE(factory.BuildChunkIndex(nullptr, in.srcLen).entries.empty());
+    EXPECT_TRUE(factory.BuildChunkIndex(in.src, 0).entries.empty());
+
+    // a corrupted stream propagates to Create: the index falls back to the full
+    // decompress, which fails on the corrupted bytes, so Create returns nullptr
+    raw.assign(in.src, in.src + in.srcLen);
+    raw[raw.size() - 1] = 0;
+    GnuDebugDataHdr badHdr;
+    badHdr.address = reinterpret_cast<uintptr_t>(raw.data());
+    badHdr.size = static_cast<uintptr_t>(raw.size());
+    MiniDebugInfoFactory corruptedFactory(badHdr);
+    EXPECT_EQ(corruptedFactory.Create(), nullptr);
+    GTEST_LOG_(INFO) << "ElfFactoryTest020_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest021_MiniDebugInfo
+ * @tc.desc: test FindBlock locates every block boundary of the real index
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest021_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest021_MiniDebugInfo: start.";
+    MiniInput in;
+    ASSERT_TRUE(LoadMiniInput(in));
+    BlockProvider provider(in.src, in.srcLen, ChunkIndex{in.idx});
+    const std::vector<ChunkBlk> &blocks = provider.Blocks();
+    ASSERT_FALSE(blocks.empty());
+    // the first and the last byte of every block resolve to that block
+    for (size_t i = 0; i < blocks.size(); i++) {
+        const ChunkBlk *first = provider.FindBlock(static_cast<uintptr_t>(blocks[i].dstOff));
+        ASSERT_NE(first, nullptr);
+        EXPECT_EQ(first->dstOff, blocks[i].dstOff);
+        uintptr_t lastByte = static_cast<uintptr_t>(blocks[i].dstOff + blocks[i].unpackSize - 1);
+        const ChunkBlk *last = provider.FindBlock(lastByte);
+        ASSERT_NE(last, nullptr);
+        EXPECT_EQ(last->dstOff, blocks[i].dstOff);
+    }
+    // one past the image end and beyond resolve to no block
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(provider.TotalUnpackSize())), nullptr);
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(provider.TotalUnpackSize() + 1)), nullptr);
+    GTEST_LOG_(INFO) << "ElfFactoryTest021_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest022_MiniDebugInfo
+ * @tc.desc: test block lookup for uniform (shift path) and non-uniform (binary search) layouts
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest022_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest022_MiniDebugInfo: start.";
+    // non-uniform layout: block sizes are not a power of two, lookup uses binary search
+    constexpr uint64_t sizeA = 100;
+    constexpr uint64_t sizeB = 50;
+    constexpr uint64_t sizeC = 70;
+    const uint64_t offB = sizeA;
+    const uint64_t offC = sizeA + sizeB;
+    const uint64_t total = offC + sizeC;
+    ChunkIndex nonUniform;
+    nonUniform.entries.push_back(MakeBlk(0, sizeA));
+    nonUniform.entries.push_back(MakeBlk(offB, sizeB));
+    nonUniform.entries.push_back(MakeBlk(offC, sizeC));
+    BlockProvider provider(nullptr, 0, ChunkIndex{nonUniform});
+    EXPECT_EQ(provider.FindBlock(0)->dstOff, 0ULL);
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(sizeA - 1))->dstOff, 0ULL);
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(offB))->dstOff, offB);
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(offB + sizeB - 1))->dstOff, offB);
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(offC))->dstOff, offC);
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(offC + sizeC - 1))->dstOff, offC);
+    EXPECT_EQ(provider.FindBlock(static_cast<uintptr_t>(total)), nullptr);
+    EXPECT_EQ(provider.TotalUnpackSize(), static_cast<size_t>(total));
+
+    // uniform power-of-two layout with a shorter trailing block: lookup uses the shift path
+    constexpr uint64_t uniformSize = 4096;
+    constexpr uint64_t trailingSize = 1000;
+    const uint64_t tailOff = uniformSize * 3;
+    ChunkIndex uniform;
+    uniform.entries.push_back(MakeBlk(0, uniformSize));
+    uniform.entries.push_back(MakeBlk(uniformSize, uniformSize));
+    uniform.entries.push_back(MakeBlk(uniformSize * 2, uniformSize));
+    uniform.entries.push_back(MakeBlk(tailOff, trailingSize));
+    BlockProvider uniformProvider(nullptr, 0, ChunkIndex{uniform});
+    EXPECT_EQ(uniformProvider.FindBlock(static_cast<uintptr_t>(uniformSize - 1))->dstOff, 0ULL);
+    EXPECT_EQ(uniformProvider.FindBlock(static_cast<uintptr_t>(uniformSize))->dstOff, uniformSize);
+    EXPECT_EQ(uniformProvider.FindBlock(static_cast<uintptr_t>(uniformSize * 2))->dstOff,
+        uniformSize * 2);
+    EXPECT_EQ(uniformProvider.FindBlock(static_cast<uintptr_t>(tailOff))->dstOff, tailOff);
+    EXPECT_EQ(uniformProvider.FindBlock(static_cast<uintptr_t>(tailOff + trailingSize - 1))->dstOff,
+        tailOff);
+    EXPECT_EQ(uniformProvider.FindBlock(static_cast<uintptr_t>(tailOff + trailingSize)), nullptr);
+    GTEST_LOG_(INFO) << "ElfFactoryTest022_MiniDebugInfo: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest023_MiniDebugInfo
+ * @tc.desc: test DecompressBlock rejects a tampered chunk index (integrity guard)
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest023_MiniDebugInfo, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest023_MiniDebugInfo: start.";
+    MiniInput in;
+    ASSERT_TRUE(LoadMiniInput(in));
+    std::vector<uint8_t> out;
+    // baseline: the untouched index decodes the first block
+    BlockProvider valid(in.src, in.srcLen, ChunkIndex{in.idx});
+    ASSERT_TRUE(valid.DecompressBlock(in.idx.entries[0], out));
+
+    // tampered packOff: decoding starts inside the block and must be rejected
+    ChunkIndex tampered = in.idx;
+    tampered.entries[0].packOff += 1;
+    BlockProvider shifted(in.src, in.srcLen, ChunkIndex{tampered});
+    EXPECT_FALSE(shifted.DecompressBlock(tampered.entries[0], out));
+
+    // tampered unpackSize: the decoded size disagrees with the record
+    tampered = in.idx;
+    tampered.entries[0].unpackSize += 1;
+    BlockProvider grown(in.src, in.srcLen, ChunkIndex{tampered});
+    EXPECT_FALSE(grown.DecompressBlock(tampered.entries[0], out));
+
+    // tampered packSize: the recorded block span disagrees with the decoder
+    tampered = in.idx;
+    tampered.entries[0].packSize += 1;
+    BlockProvider span(in.src, in.srcLen, ChunkIndex{tampered});
+    EXPECT_FALSE(span.DecompressBlock(tampered.entries[0], out));
+    GTEST_LOG_(INFO) << "ElfFactoryTest023_MiniDebugInfo: end.";
+}
 #endif //__x86_64__
 #endif //ENABLE_MINIDEBUGINFO
 

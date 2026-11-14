@@ -520,7 +520,7 @@ bool ElfParser::ParseFuncSymbols(const ElfShdr& shdr)
 template <typename SymType>
 bool ElfParser::ParseFuncSymbolName(const ShdrInfo& linkShdr, SymType sym, std::string& nameStr)
 {
-    if (!IsFunc(sym) || mmap_->Get() == nullptr) {
+    if (!IsFunc(sym)) {
         return false;
     }
     uint64_t mmapSize = MmapSize();
@@ -544,9 +544,29 @@ bool ElfParser::ParseFuncSymbolName(const ShdrInfo& linkShdr, SymType sym, std::
             ", mmapSize: %{public}" PRIu64, linkShdr.offset, static_cast<uint64_t>(sym.st_name), mmapSize);
         return false;
     }
-    nameStr = std::string(static_cast<char*>(mmap_->Get()) + nameOffset, strnlen(
-        static_cast<char*>(mmap_->Get()) + nameOffset, mmapSize - nameOffset));
-    return true;
+    uint64_t strtabRemaining = linkShdr.size - static_cast<uint64_t>(sym.st_name);
+    // Read the name in bounded chunks instead of requesting the whole remaining string
+    // table. In paged mini-debuginfo mode a resident request spans every block up to its
+    // end, so asking for strtabRemaining would decompress the whole tail of the image on
+    // the first resolved symbol and defeat paged access.
+    constexpr size_t maxNameChunk = 256;
+    nameStr.clear();
+    uint64_t readLen = 0;
+    while (readLen < strtabRemaining) {
+        size_t chunk = std::min<size_t>(maxNameChunk, static_cast<size_t>(strtabRemaining - readLen));
+        const char* namePtr = reinterpret_cast<const char*>(mmap_->GetResidentPtr(
+            static_cast<uintptr_t>(nameOffset + readLen), chunk));
+        if (namePtr == nullptr) {
+            return false;
+        }
+        size_t len = strnlen(namePtr, chunk);
+        nameStr.append(namePtr, len);
+        if (len < chunk) {
+            return true;
+        }
+        readLen += chunk;
+    }
+    return false;
 }
 
 template <typename SymType>

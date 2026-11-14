@@ -289,6 +289,53 @@ HWTEST_F(DfxElfTest, DfxElfTest004, TestSize.Level2)
 }
 #endif
 
+#if defined(ENABLE_MINIDEBUGINFO) && !is_emulator && !defined(__x86_64__)
+/**
+ * @tc.name: DfxElfTest007_PagedMiniElf
+ * @tc.desc: test paged mini DfxElf parse results match full decompress path (AC-03)
+ * @tc.type: FUNC
+ */
+HWTEST_F(DfxElfTest, DfxElfTest007_PagedMiniElf, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "DfxElfTest007_PagedMiniElf: start.";
+    UnwinderConfig::SetEnableMiniDebugInfo(true);
+    RegularElfFactory factory(DUMPCATCHER_ELF_FILE);
+    auto elf = factory.Create();
+    ASSERT_TRUE(elf->IsValid());
+    auto hdr = elf->GetGnuDebugDataHdr();
+    ASSERT_TRUE(hdr.size != 0);
+    auto src = reinterpret_cast<const uint8_t *>(hdr.address);
+    size_t srcLen = hdr.size;
+    MiniDebugInfoFactory miniFactory(hdr);
+    auto fullMini = miniFactory.Create();
+    ASSERT_TRUE(fullMini != nullptr && fullMini->IsValid());
+    ChunkIndex idx = miniFactory.BuildChunkIndex(src, srcLen);
+    ASSERT_FALSE(idx.entries.empty());
+    size_t totalSize = 0;
+    for (const auto& blk : idx.entries) {
+        totalSize += static_cast<size_t>(blk.unpackSize);
+    }
+    ASSERT_GT(totalSize, 0U);
+    auto provider = std::make_shared<BlockProvider>(src, srcLen, std::move(idx));
+    auto pagedMap = std::make_shared<DfxMmap>();
+    ASSERT_TRUE(pagedMap->InitPaged(provider, totalSize));
+    auto pagedMini = std::make_shared<DfxElf>(pagedMap);
+    ASSERT_TRUE(pagedMini->IsValid());
+    auto fullSyms = fullMini->GetFuncSymbols();
+    auto pagedSyms = pagedMini->GetFuncSymbols();
+    EXPECT_EQ(fullSyms.size(), pagedSyms.size());
+    auto fullIt = fullSyms.begin();
+    auto pagedIt = pagedSyms.begin();
+    while (fullIt != fullSyms.end() && pagedIt != pagedSyms.end()) {
+        EXPECT_EQ(fullIt->nameStr, pagedIt->nameStr);
+        EXPECT_EQ(fullIt->value, pagedIt->value);
+        ++fullIt;
+        ++pagedIt;
+    }
+    GTEST_LOG_(INFO) << "DfxElfTest007_PagedMiniElf: end.";
+}
+#endif
+
 /**
  * @tc.name: DfxElfTest005
  * @tc.desc: test GetBuildId function when input empty elf file path

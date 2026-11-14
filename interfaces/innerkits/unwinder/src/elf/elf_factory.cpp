@@ -18,7 +18,9 @@
 #include <string>
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
+#include <securec.h>
 #include <unistd.h>
 #include <utility>
 #include <sys/stat.h>
@@ -76,15 +78,33 @@ std::shared_ptr<DfxElf> MiniDebugInfoFactory::Create()
     if (!UnwinderConfig::GetEnableMiniDebugInfo()) {
         return nullptr;
     }
-
+    auto src = reinterpret_cast<const uint8_t *>(gnuDebugDataHdr_.address);
+    size_t srcLen = gnuDebugDataHdr_.size;
+    if (src == nullptr || srcLen == 0) {
+        return nullptr;
+    }
+    ChunkIndex idx = BuildChunkIndex(src, srcLen);
+    if (idx.entries.size() > 1) {
+        DFXLOGU("Paged mini debuginfo, blocks: %{public}zu", idx.entries.size());
+        size_t totalSize = 0;
+        for (const auto& blk : idx.entries) {
+            totalSize += static_cast<size_t>(blk.unpackSize);
+        }
+        auto provider = std::make_shared<BlockProvider>(src, srcLen, std::move(idx));
+        auto pagedMap = std::make_shared<DfxMmap>();
+        if (totalSize > 0 && pagedMap->InitPaged(provider, totalSize)) {
+            auto paged = std::make_shared<DfxElf>(pagedMap);
+            if (paged->IsValid()) {
+                return paged;
+            }
+            DFXLOGW("Paged mini debuginfo invalid, fallback to full decompress.");
+        }
+    }
     std::vector<uint8_t> miniDebugInfoData;
-    if (!XzDecompress(reinterpret_cast<uint8_t *>(gnuDebugDataHdr_.address),
-        gnuDebugDataHdr_.size, miniDebugInfoData)) {
+    if (!XzDecompress(src, srcLen, miniDebugInfoData)) {
         DFXLOGU("Failed to decompressed .gnu_debugdata seciton.");
         return nullptr;
     }
-    // miniDebugInfoData store the decompressed bytes.
-    // use these bytes to construct an elf.
     auto mMap = std::make_shared<DfxMmap>();
     if (!mMap->Init(std::move(miniDebugInfoData))) {
         DFXLOGE("Failed to init mmap_!");
@@ -107,6 +127,8 @@ static void XzFree(ISzAllocPtr, void *address)
 {
     free(address);
 }
+
+// Reads one xz variable-length integer (little-endian base-128) at *pos.
 
 bool MiniDebugInfoFactory::XzDecompress(const uint8_t *src, size_t srcLen, std::vector<uint8_t>& out)
 {
@@ -148,6 +170,135 @@ bool MiniDebugInfoFactory::XzDecompress(const uint8_t *src, size_t srcLen, std::
     }
     out.resize(dstOff);
     return true;
+}
+
+// Reads one xz variable-length integer (little-endian base-128) at *pos.
+constexpr int XZ_VARINT_BITS_PER_BYTE = 7; // LEB128 carries 7 payload bits per byte
+constexpr int XZ_VARINT_MAX_BITS = 64;     // more than 9 bytes exceeds the uint64_t width
+
+static bool ReadXzVarInt(const uint8_t *buf, size_t len, size_t &pos, uint64_t &val)
+{
+    val = 0;
+    int shift = 0;
+    while (pos < len) {
+        uint8_t byte = buf[pos++];
+        val |= static_cast<uint64_t>(byte & 0x7F) << shift;
+        if ((byte & 0x80) == 0) {
+            return true;
+        }
+        shift += XZ_VARINT_BITS_PER_BYTE;
+        if (shift >= XZ_VARINT_MAX_BITS) { // more than 9 bytes: malformed
+            return false;
+        }
+    }
+    return false;
+}
+
+// Validates the stream footer and locates the xz Stream Index at the tail of the stream:
+// *index/*indexSize describe the range [src+srcLen-footerSize-indexSize, src+srcLen-footerSize).
+// Requires src != nullptr; returns false on any inconsistency (also implies srcLen >=
+// XZ_STREAM_HEADER_SIZE, keeping subsequent header reads in bounds).
+static bool LocateXzStreamIndex(const uint8_t *src, size_t srcLen, uint64_t &indexSize,
+    const uint8_t *&index)
+{
+    constexpr size_t footerSize = XZ_STREAM_FOOTER_SIZE;
+    if (srcLen < XZ_STREAM_HEADER_SIZE + footerSize) {
+        return false;
+    }
+    // Stream Footer: CRC32(4) | Backward Size(4) | Stream Flags(2) | "YZ"(2).
+    constexpr size_t footerBackwardSizeOffset = XZ_STREAM_CRC_SIZE;
+    constexpr size_t footerSigOffset = footerBackwardSizeOffset + 4 + XZ_STREAM_FLAGS_SIZE;
+    const uint8_t *footer = src + srcLen - footerSize;
+    if (footer[footerSigOffset] != XZ_FOOTER_SIG_0 || footer[footerSigOffset + 1] != XZ_FOOTER_SIG_1) {
+        DFXLOGE("Invalid xz footer signature");
+        return false;
+    }
+    uint32_t backwardSize = 0;
+    if (memcpy_s(&backwardSize, sizeof(backwardSize), footer + footerBackwardSizeOffset,
+        sizeof(backwardSize)) != 0) {
+        DFXLOGE("Failed to read xz footer backward size");
+        return false;
+    }
+    // Backward Size is stored as (realSize / 4) - 1.
+    indexSize = (static_cast<uint64_t>(backwardSize) + 1) * 4;
+    if (indexSize + footerSize > srcLen - XZ_STREAM_HEADER_SIZE) {
+        DFXLOGE("Invalid xz index size: %{public}" PRIu64, indexSize);
+        return false;
+    }
+    index = src + srcLen - footerSize - indexSize;
+    return true;
+}
+
+// Reads the Index Indicator (must be 0x00) and the record count at the Stream Index head.
+static bool ReadXzIndexHeader(const uint8_t *index, uint64_t indexSize, size_t &pos,
+    uint64_t &recordCount)
+{
+    if (index[pos++] != 0) {
+        DFXLOGE("Invalid xz index indicator");
+        return false;
+    }
+    if (!ReadXzVarInt(index, static_cast<size_t>(indexSize), pos, recordCount) || recordCount == 0) {
+        DFXLOGE("Invalid xz index record count");
+        return false;
+    }
+    return true;
+}
+
+// Builds the chunk index straight from the xz Stream Index at the tail of the stream.
+// The index already records every block's unpadded size and uncompressed size, so this
+// needs no decompression at all. Decompressing each block just to learn its sizes would
+// cost a full decompress of the image (hundreds of ms for a large .gnu_debugdata) and
+// defeat the point of paged access.
+ChunkIndex MiniDebugInfoFactory::BuildChunkIndex(const uint8_t *src, size_t srcLen)
+{
+    ChunkIndex idx;
+    if (src == nullptr) {
+        return idx;
+    }
+    uint64_t indexSize = 0;
+    const uint8_t *index = nullptr;
+    if (!LocateXzStreamIndex(src, srcLen, indexSize, index)) {
+        return idx;
+    }
+    CXzStreamFlags flags;
+    if (Xz_ParseHeader(&flags, src) != SZ_OK) {
+        return idx;
+    }
+    idx.streamFlags = static_cast<uint16_t>(flags);
+    size_t pos = 0;
+    uint64_t recordCount = 0;
+    if (!ReadXzIndexHeader(index, indexSize, pos, recordCount)) {
+        return idx;
+    }
+    uint64_t packOff = XZ_STREAM_HEADER_SIZE;
+    uint64_t dstOff = 0;
+    for (uint64_t i = 0; i < recordCount; i++) {
+        uint64_t unpaddedSize = 0;
+        uint64_t unpackSize = 0;
+        if (!ReadXzVarInt(index, indexSize, pos, unpaddedSize) ||
+            !ReadXzVarInt(index, indexSize, pos, unpackSize)) {
+            DFXLOGE("Truncated xz index record");
+            return ChunkIndex{};
+        }
+        // Unpadded size covers block header + compressed data + check, but the block is
+        // padded to a multiple of four bytes; the padding belongs to the block's span.
+        uint64_t paddedSize = unpaddedSize + ((4 - (unpaddedSize & 3)) & 3);
+        // A zero-size record would stall the resident-window walk; a record past the
+        // stream end means a corrupted index.
+        if (unpaddedSize == 0 || unpackSize == 0 || paddedSize > srcLen - packOff) {
+            DFXLOGE("Invalid xz index record %{public}" PRIu64, i);
+            return ChunkIndex{};
+        }
+        ChunkBlk blk;
+        blk.dstOff = dstOff;
+        blk.unpackSize = unpackSize;
+        blk.packOff = packOff;
+        blk.packSize = paddedSize;
+        idx.entries.push_back(blk);
+        dstOff += unpackSize;
+        packOff += paddedSize;
+    }
+    return idx;
 }
 #endif
 
