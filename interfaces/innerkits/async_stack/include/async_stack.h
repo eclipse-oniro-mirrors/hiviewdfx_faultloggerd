@@ -33,7 +33,8 @@ typedef void(*HiDebugSetSwitchCallbackFunc)(bool enable);
 bool DfxInitAsyncStack();
 
 /**
- * @brief init async stack with debuggable info
+ * @brief init async stack with debuggable info without loading the Ark runtime
+ * Ark frames require step_ark to be globally visible at initialization.
  *
  * @param isDebugApp whether the current app is a debuggable app
  * @return if succeed return true, otherwise return false

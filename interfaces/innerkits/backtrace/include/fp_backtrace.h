@@ -23,6 +23,10 @@ namespace HiviewDFX {
 class FpBacktrace {
 public:
     static FpBacktrace* CreateInstance();
+    // With loading disabled, resolve step_ark once from already visible libraries.
+    // Missing Ark support stops at Ark frames; native FP unwinding remains available.
+    // The caller must keep the library providing step_ark loaded for this object's lifetime.
+    static FpBacktrace* CreateInstance(bool allowArkDlopen);
     static void UpdateArkStackRange(uintptr_t arkStubBegin, uintptr_t arkStubEnd);
     virtual ~FpBacktrace() = default;
     virtual uint32_t BacktraceFromFp(void* startFp, void** pcArray, uint32_t size, bool adjustPc = false) = 0;
