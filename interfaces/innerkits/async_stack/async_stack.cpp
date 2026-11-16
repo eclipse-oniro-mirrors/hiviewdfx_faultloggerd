@@ -430,7 +430,7 @@ void DfxSetAsyncStackCallback()
 }
 #endif
 
-static bool InitAsyncStack(bool isDebugApp, [[maybe_unused]] bool allowArkDlopen)
+static bool InitAsyncStack(bool isDebugApp, bool allowArkDlopen)
 {
 #if defined(__aarch64__)
     // init unique stack table
