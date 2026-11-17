@@ -10,6 +10,7 @@
       DfxGetSubmitterStackId;
       DfxSetSubmitterStackId;
       DfxInitProfilerAsyncStack;
+      DfxExchangeSampleMode;
       DfxSetAsyncStackType;
       DfxCollectStackWithDepth;
       DfxCollectAsyncStack;

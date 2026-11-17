@@ -79,12 +79,6 @@ constexpr const char* const FANS_STAGE_KEY = "const.product.dfx.fans.stage";
 constexpr const char* const HAP_DEBUGGABLE_ENV = "HAP_DEBUGGABLE";
 constexpr uint32_t SAMPLE_INTERVAL = 2000;
 
-enum SampleMode : uint8_t {
-    SAMPLE_MODE_NONE,
-    SAMPLE_MODE_FULL,
-    SAMPLE_MODE_SAMPLED,
-};
-
 static std::atomic<SampleMode> g_sampleMode{SAMPLE_MODE_FULL};
 
 static bool IsDebuggableApp()
@@ -513,6 +507,17 @@ extern "C" bool DfxInitProfilerAsyncStack(void* buffer, size_t size)
     g_init.store(true);
 #endif
     return g_init.load();
+}
+
+extern "C" SampleMode DfxExchangeSampleMode(SampleMode mode)
+{
+#if defined(__aarch64__)
+    DFXLOGI("DfxExchangeSampleMode lastMode: %{public}d, mode: %{public}d",
+        static_cast<int>(g_sampleMode.load()), static_cast<int>(mode));
+    return g_sampleMode.exchange(mode);
+#else
+    return SAMPLE_MODE_NONE;
+#endif
 }
 
 extern "C" void SetChainedAsyncStackConfig(uint32_t maxLayer, uint32_t maxStackDepth, uint32_t maxChainPoolSize)

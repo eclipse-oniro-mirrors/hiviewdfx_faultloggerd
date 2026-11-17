@@ -126,6 +126,24 @@ void DfxSetSubmitterStackId(uint64_t stackId);
 bool DfxInitProfilerAsyncStack(void* buffer, size_t size);
 
 typedef enum {
+    SAMPLE_MODE_NONE,
+    SAMPLE_MODE_FULL,
+    SAMPLE_MODE_SAMPLED,
+} SampleMode;
+
+/**
+ * @brief set the sample mode and return the last sample mode value
+ *
+ * @param mode  current sample mode (specific type definition see SampleMode)
+ * @return return the sample mode value before setting
+ *
+ * @note The default value is SAMPLE_MODE_FULL.
+ *       If you change the sample mode temporarily, call this function again to restore:
+ *       SampleMode lastMode = DfxExchangeSampleMode(xxx); ...; DfxExchangeSampleMode(lastMode);
+*/
+SampleMode DfxExchangeSampleMode(SampleMode mode);
+
+typedef enum {
     MODE_LAST_STACKTRACE,
     MODE_CHAINED_STACKTRACE,
 } DfxAsyncMode;
