@@ -18,6 +18,8 @@
 #include <dlfcn.h>
 #include <cerrno>
 #include <cstdint>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "dfx_maps.h"
 #include "dfx_symbols.h"
@@ -346,9 +348,9 @@ HWTEST_F(ElfFactoryTest, ElfFactoryTest014, TestSize.Level2)
 }
 
 namespace {
-std::string WriteElfFile(const std::vector<uint8_t>& data, const std::string& suffix)
+std::string WriteElfFileToDir(const std::vector<uint8_t>& data, const std::string& dir, const std::string& suffix)
 {
-    std::string path = "/data/local/tmp/elf_factory_test_XXXXXX" + suffix;
+    std::string path = dir + "/elf_factory_test_XXXXXX" + suffix;
     std::vector<char> buf(path.begin(), path.end());
     buf.push_back(0);
     int fd = mkstemps(buf.data(), static_cast<int>(suffix.size()));
@@ -370,6 +372,21 @@ std::string WriteElfFile(const std::vector<uint8_t>& data, const std::string& su
     }
     close(fd);
     return std::string(buf.data());
+}
+
+std::string WriteElfFile(const std::vector<uint8_t>& data, const std::string& suffix)
+{
+    return WriteElfFileToDir(data, "/data/local/tmp", suffix);
+}
+
+bool EnsureDirExists(const std::string& dir)
+{
+    // owner read/write/execute, group and others read/execute
+    constexpr mode_t tempDirMode = 0755;
+    if (access(dir.c_str(), F_OK) == 0) {
+        return true;
+    }
+    return mkdir(dir.c_str(), tempDirMode) == 0;
 }
 } // namespace
 
@@ -541,6 +558,105 @@ HWTEST_F(ElfFactoryTest, ElfFactoryTest019, TestSize.Level2)
     ASSERT_EQ(zeroFactory.Create(), nullptr);
     unlink(zeroPath.c_str());
     GTEST_LOG_(INFO) << "ElfFactoryTest019: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest020
+ * @tc.desc: test CompressHapElfFactory guard clauses for hsp and hqf files
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest020, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest020: start.";
+    // hsp without the sandbox prefix is illegal
+    CompressHapElfFactory badHsp("/data/local/tmp/guard.hsp", nullptr, 0x100, 0x100);
+    ASSERT_EQ(badHsp.Create(), nullptr);
+    // hqf without the sandbox prefix is illegal
+    CompressHapElfFactory badHqf("/data/local/tmp/guard.hqf", nullptr, 0x100, 0x100);
+    ASSERT_EQ(badHqf.Create(), nullptr);
+    // hsp inside the sandbox prefix but pointing at a missing file
+    CompressHapElfFactory missingHsp("/data/storage/el1/bundle/not_exist_guard.hsp", nullptr, 0x100, 0x100);
+    ASSERT_EQ(missingHsp.Create(), nullptr);
+    // hqf inside the sandbox prefix but pointing at a missing file
+    CompressHapElfFactory missingHqf("/data/storage/el1/bundle/not_exist_guard.hqf", nullptr, 0x100, 0x100);
+    ASSERT_EQ(missingHqf.Create(), nullptr);
+    GTEST_LOG_(INFO) << "ElfFactoryTest020: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest021
+ * @tc.desc: test CompressHapElfFactory loads the embedded elf of hsp and hqf files
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest021, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest021: start.";
+    CraftedElfOptions opt;
+    opt.withText = true;
+    auto image = ElfCraftBuilder::Build(opt);
+    std::vector<uint8_t> file(0x1000, 0x41); // 0x1000 : leading padding
+    file.insert(file.end(), image.begin(), image.end());
+
+    // the path must contain the sandbox prefix, carve it out under the temp dir
+    if (!EnsureDirExists("/data/local/tmp/data") || !EnsureDirExists("/data/local/tmp/data/storage")) {
+        GTEST_SKIP() << "sandbox-like temp dir not creatable";
+    }
+    const std::string sandboxDir = "/data/local/tmp/data/storage";
+    std::string hspPath = WriteElfFileToDir(file, sandboxDir, ".hsp");
+    std::string hqfPath = WriteElfFileToDir(file, sandboxDir, ".hqf");
+    if (hspPath.empty() || hqfPath.empty()) {
+        GTEST_SKIP() << "temp file not writable";
+    }
+
+    CompressHapElfFactory hspFactory(hspPath, nullptr, 0x1000, image.size());
+    auto hspElf = hspFactory.Create();
+    ASSERT_NE(hspElf, nullptr);
+    EXPECT_TRUE(hspElf->IsValid());
+    EXPECT_EQ(hspElf->GetBaseOffset(), 0x1000U);
+
+    // prev map fallback: curOffset is zero, the elf sits at prevMap->offset
+    auto prevMap = std::make_shared<DfxMap>(0x7000000, 0x7000000 + image.size(), 0x1000, PROT_READ, hqfPath);
+    CompressHapElfFactory hqfFactory(hqfPath, prevMap, 0, 0);
+    auto hqfElf = hqfFactory.Create();
+    ASSERT_NE(hqfElf, nullptr);
+    EXPECT_EQ(hqfElf->GetBaseOffset(), 0x1000U);
+
+    unlink(hspPath.c_str());
+    unlink(hqfPath.c_str());
+    GTEST_LOG_(INFO) << "ElfFactoryTest021: end.";
+}
+
+/**
+ * @tc.name: ElfFactoryTest022
+ * @tc.desc: test ElfFactorySelector routes hsp and hqf sandbox maps like hap maps
+ * @tc.type: FUNC
+ */
+HWTEST_F(ElfFactoryTest, ElfFactoryTest022, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "ElfFactoryTest022: start.";
+    auto prev = std::make_shared<DfxMap>(0x7000000, 0x7001000, 0x800, PROT_READ,
+        "/data/storage/el1/bundle/test.hsp");
+
+    // no rtti in this target: assert through the observable map offset side effects
+    DfxMap hspMap(0x7001000, 0x7002000, 0x1000, PROT_READ, "/data/storage/el1/bundle/test.hsp");
+    hspMap.prevMap = prev;
+    auto hspFactory = ElfFactorySelector::Select(hspMap, getpid());
+    ASSERT_NE(hspFactory, nullptr);
+    EXPECT_EQ(hspMap.offset, 0x800U); // 0x800 : relative to the previous hsp map
+
+    DfxMap hqfMap(0x7002000, 0x7003000, 0x1000, PROT_READ, "/data/storage/el1/bundle/patch/test.hqf");
+    hqfMap.prevMap = prev;
+    auto hqfFactory = ElfFactorySelector::Select(hqfMap, getpid());
+    ASSERT_NE(hqfFactory, nullptr);
+    EXPECT_EQ(hqfMap.offset, 0x800U); // 0x800 : relative to the previous hqf map
+
+    // hsp outside the sandbox is not routed to the compressed hap path: no rebasing
+    DfxMap sysHspMap(0x7003000, 0x7004000, 0x1000, PROT_READ, "/system/app/test/test.hsp");
+    sysHspMap.prevMap = prev;
+    auto sysHspFactory = ElfFactorySelector::Select(sysHspMap, getpid());
+    ASSERT_NE(sysHspFactory, nullptr);
+    EXPECT_EQ(sysHspMap.offset, 0x1000U);
+    GTEST_LOG_(INFO) << "ElfFactoryTest022: end.";
 }
 }
 }

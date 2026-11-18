@@ -30,6 +30,7 @@
 #include "dfx_trace_dlsym.h"
 #include "dfx_util.h"
 #include "smart_fd.h"
+#include "string_util.h"
 #if defined(ENABLE_MINIDEBUGINFO)
 #include "7zCrc.h"
 #include "unwinder_config.h"
@@ -210,9 +211,10 @@ std::shared_ptr<DfxElf> CompressHapElfFactory::Create()
         return nullptr;
     }
     // Do not use the Realpath function, the sandbox path Realpath function will return failure
-    bool isHap = EndsWith(filePath_, ".hap");
+    bool isHapLike = IsHapLikeFile(filePath_);
     bool isApk = EndsWith(filePath_, ".apk");
-    if ((isHap && filePath_.find(SANDBOX_FILE_PATH_PREFIX) == std::string::npos) || (!isHap && !isApk)) {
+    if ((isHapLike && filePath_.find(SANDBOX_FILE_PATH_PREFIX) == std::string::npos) ||
+        (!isHapLike && !isApk)) {
         DFXLOGD("Illegal file path, please check file: %{public}s", filePath_.c_str());
         return nullptr;
     }

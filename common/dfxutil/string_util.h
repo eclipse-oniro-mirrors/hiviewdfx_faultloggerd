@@ -74,6 +74,15 @@ inline bool EndsWithIgnoreCase(const std::string& s, const std::string& suffix)
         strncasecmp(s.data() + (s.size() - suffix.size()), suffix.data(), suffix.size()) == 0;
 }
 
+/* Check whether the name ends with an OpenHarmony app package suffix:
+ * .hap (application package), .hsp (shared package) or .hqf (quick fix package).
+ * Such packages may embed a page-aligned elf which is mapped directly by the loader.
+ */
+inline bool IsHapLikeFile(const std::string& name)
+{
+    return EndsWith(name, ".hap") || EndsWith(name, ".hsp") || EndsWith(name, ".hqf");
+}
+
 inline void Trim(std::string& str)
 {
     std::string blanks("\f\v\r\t\n ");
