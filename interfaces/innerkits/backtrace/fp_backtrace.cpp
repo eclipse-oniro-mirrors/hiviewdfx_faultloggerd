@@ -248,7 +248,7 @@ FpBacktrace* FpBacktrace::CreateInstance()
     return CreateInstance(true);
 }
 
-FpBacktrace* FpBacktrace::CreateInstance([[maybe_unused]] bool allowArkDlopen)
+FpBacktrace* FpBacktrace::CreateInstance(bool allowArkDlopen)
 {
 #if is_ohos && !is_mingw && (defined(__aarch64__) || defined(__x86_64__))
     auto fpBacktraceImpl =  new (std::nothrow) FpBacktraceImpl();
