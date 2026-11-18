@@ -37,6 +37,8 @@ private:
                       uintptr_t& val, bool& isDexPc);
     static bool GetCfa(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, RegLocState& rsState,
                        uintptr_t& cfa, uint16_t& errCode);
+    static void UpdateRegsFromLocs(DfxRegs& regs, std::shared_ptr<DfxMemory> memory,
+                                   uintptr_t cfa, RegLocState& rsState);
 };
 } // namespace HiviewDFX
 } // namespace OHOS

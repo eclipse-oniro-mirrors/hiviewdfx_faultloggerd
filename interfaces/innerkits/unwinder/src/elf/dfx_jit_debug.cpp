@@ -137,7 +137,8 @@ bool DfxJitDebug::ReadU32(uint64_t addr, uint32_t* val)
 uint64_t DfxJitDebug::StripAddressTag(uint64_t addr)
 {
     if (arch_ == ARCH_ARM64) {
-        return static_cast<uint64_t>((static_cast<int64_t>(addr) << 8) >> 8); // 8 : shift to remove tag bit
+        constexpr uint64_t kArm64TagBits = 8;
+        return (addr << kArm64TagBits) >> kArm64TagBits;
     }
     return addr;
 }
@@ -262,10 +263,11 @@ bool DfxJitDebug::ReadDescriptor()
 
 bool DfxJitDebug::ReadNextField(uint64_t fieldAddr, JitUID* uid, bool* race)
 {
-    uint64_t address[2] = {0, 0};
-    uint32_t seqlock[2] = {0, 0};
+    constexpr int kSeqlockReadCount = 2;
+    uint64_t address[kSeqlockReadCount] = {0, 0};
+    uint32_t seqlock[kSeqlockReadCount] = {0, 0};
 
-    for (int i = 0; i < 2; i++) { // 2 : loop
+    for (int i = 0; i < kSeqlockReadCount; i++) {
         if (!ReadU64(fieldAddr, &address[i])) {
             return false;
         }
@@ -354,46 +356,83 @@ bool DfxJitDebug::LoadJitElf(uint64_t addr, uint64_t size, std::shared_ptr<DfxEl
         return false;
     }
 
+    if (!TrySetJitRangeFromTextSection(elf)) {
+        if (!TrySetJitRangeFromSymbols(elf)) {
+            SetJitRangeFromPtLoads(elf);
+        }
+    }
+
+    return true;
+}
+
+bool DfxJitDebug::TrySetJitRangeFromTextSection(const std::shared_ptr<DfxElf>& elf)
+{
     ShdrInfo textShdr;
     if (elf->GetSectionInfo(textShdr, ".text") && textShdr.size != 0) {
         uint64_t runtimeStart = textShdr.addr;
         uint64_t runtimeEnd = runtimeStart + textShdr.size;
         elf->SetRuntimeRange(runtimeStart, runtimeEnd);
         elf->SetLoadBase(0);
-    } else {
-        const auto& symbols = elf->GetFuncSymbols();
-        uint64_t minAddr = static_cast<uint64_t>(-1);
-        uint64_t maxAddr = 0;
-        for (const auto& sym : symbols) {
-            if (sym.value != 0 && sym.size != 0) {
-                minAddr = std::min(minAddr, sym.value);
-                maxAddr = std::max(maxAddr, sym.value + sym.size);
-            }
-        }
-        if (minAddr != static_cast<uint64_t>(-1) && maxAddr != 0) {
-            uint64_t runtimeStart = minAddr;
-            uint64_t runtimeEnd = maxAddr;
-            elf->SetRuntimeRange(runtimeStart, runtimeEnd);
-            elf->SetLoadBase(0);
-        } else {
-            const auto& ptLoads = elf->GetPtLoads();
-            uint64_t ptStart = static_cast<uint64_t>(-1);
-            uint64_t ptEnd = 0;
-            for (const auto& entry : ptLoads) {
-                if (entry.second.tableSize == 0) {
-                    continue;
-                }
-                ptStart = std::min(ptStart, entry.second.tableVaddr);
-                ptEnd = std::max(ptEnd, entry.second.tableVaddr + entry.second.tableSize);
-            }
-            elf->SetLoadBase(0);
-            if (ptStart != static_cast<uint64_t>(-1) && ptEnd != 0) {
-                elf->SetRuntimeRange(ptStart, ptEnd);
-            } else {
-            }
+        return true;
+    }
+    return false;
+}
+
+bool DfxJitDebug::TrySetJitRangeFromSymbols(const std::shared_ptr<DfxElf>& elf)
+{
+    const auto& symbols = elf->GetFuncSymbols();
+    uint64_t minAddr = static_cast<uint64_t>(-1);
+    uint64_t maxAddr = 0;
+    for (const auto& sym : symbols) {
+        if (sym.value != 0 && sym.size != 0) {
+            minAddr = std::min(minAddr, sym.value);
+            maxAddr = std::max(maxAddr, sym.value + sym.size);
         }
     }
+    if (minAddr != static_cast<uint64_t>(-1) && maxAddr != 0) {
+        uint64_t runtimeStart = minAddr;
+        uint64_t runtimeEnd = maxAddr;
+        elf->SetRuntimeRange(runtimeStart, runtimeEnd);
+        elf->SetLoadBase(0);
+        return true;
+    }
+    return false;
+}
 
+void DfxJitDebug::SetJitRangeFromPtLoads(const std::shared_ptr<DfxElf>& elf)
+{
+    const auto& ptLoads = elf->GetPtLoads();
+    uint64_t ptStart = static_cast<uint64_t>(-1);
+    uint64_t ptEnd = 0;
+    for (const auto& entry : ptLoads) {
+        if (entry.second.tableSize == 0) {
+            continue;
+        }
+        ptStart = std::min(ptStart, entry.second.tableVaddr);
+        ptEnd = std::max(ptEnd, entry.second.tableVaddr + entry.second.tableSize);
+    }
+    elf->SetLoadBase(0);
+    if (ptStart != static_cast<uint64_t>(-1) && ptEnd != 0) {
+        elf->SetRuntimeRange(ptStart, ptEnd);
+    }
+}
+
+bool DfxJitDebug::ResolveEntryElf(const JitUID& uid, const JitCodeEntry& data,
+    std::map<JitUID, std::shared_ptr<DfxElf>>* entries, bool* race)
+{
+    auto it = entries_.find(uid);
+    if (it != entries_.end()) {
+        entries->emplace(uid, it->second);
+    } else if (data.symfileAddr != 0) {
+        std::shared_ptr<DfxElf> elf;
+        bool ok = LoadJitElf(data.symfileAddr, data.symfileSize, elf, uid);
+        if (!CheckSeqlock(uid, race)) {
+            return false;
+        }
+        if (ok) {
+            entries->emplace(uid, elf);
+        }
+    }
     return true;
 }
 
@@ -430,18 +469,8 @@ bool DfxJitDebug::ReadNewEntries(std::map<JitUID, std::shared_ptr<DfxElf>>* entr
             return false;
         }
 
-        auto it = entries_.find(uid);
-        if (it != entries_.end()) {
-            entries->emplace(uid, it->second);
-        } else if (data.symfileAddr != 0) {
-            std::shared_ptr<DfxElf> elf;
-            bool ok = LoadJitElf(data.symfileAddr, data.symfileSize, elf, uid);
-            if (!CheckSeqlock(uid, race)) {
-                return false;
-            }
-            if (ok) {
-                entries->emplace(uid, elf);
-            }
+        if (!ResolveEntryElf(uid, data, entries, race)) {
+            return false;
         }
 
         JitUID nextUid;
@@ -488,57 +517,62 @@ bool DfxJitDebug::ReadAllEntriesRaceRetry()
     return false;
 }
 
-bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias)
+struct JitPcHit {
+    JitUID uid;
+    std::shared_ptr<DfxElf> elf;
+    uint64_t loadBias;
+};
+
+struct PerPidJitCache {
+    std::unordered_map<uint64_t, JitPcHit> hitPcs;
+    std::unordered_set<uint64_t> missedPcs;
+    size_t entriesSizeWhenCached = 0;
+};
+
+static std::mutex g_missMutex;
+static std::unordered_map<uint32_t, PerPidJitCache> g_jitPerPid;
+static std::deque<uint32_t> g_pidLru;
+
+constexpr size_t MAX_JIT_CACHE_PER_PID_ENTRIES = 8192;
+constexpr size_t MAX_JIT_CACHE_PIDS = 4;
+
+static PerPidJitCache& AcquireJitBucketLocked(uint32_t pid)
 {
-    std::lock_guard<std::mutex> guard(lock_);
-    if (descriptorPid_ != pid_) {
-        descriptorAddr_ = 0;
-        entries_.clear();
-        descriptorPid_ = pid_;
+    auto lruIt = std::find(g_pidLru.begin(), g_pidLru.end(), pid);
+    if (lruIt != g_pidLru.end()) {
+        g_pidLru.erase(lruIt);
     }
-    struct PerPidJitCache {
-        std::unordered_map<uint64_t, std::tuple<JitUID, std::shared_ptr<DfxElf>, uint64_t>> hitPcs;
-        std::unordered_set<uint64_t> missedPcs;
-        size_t entriesSizeWhenCached = 0;
-    };
-    static std::mutex s_missMutex;
-    static std::unordered_map<uint32_t, PerPidJitCache> s_jitPerPid;
-    static std::deque<uint32_t> s_pidLru;
-    constexpr size_t kMaxPerPidEntries = 8192;
-    constexpr size_t kMaxPids = 4;
-    const uint32_t keyPid = static_cast<uint32_t>(pid_);
-    auto acquireBucketLocked = [&]() -> PerPidJitCache& {
-        auto lruIt = std::find(s_pidLru.begin(), s_pidLru.end(), keyPid);
-        if (lruIt != s_pidLru.end()) {
-            s_pidLru.erase(lruIt);
-        }
-        s_pidLru.push_back(keyPid);
-        while (s_pidLru.size() > kMaxPids) {
-            s_jitPerPid.erase(s_pidLru.front());
-            s_pidLru.pop_front();
-        }
-        return s_jitPerPid[keyPid];
-    };
+    g_pidLru.push_back(pid);
+    while (g_pidLru.size() > MAX_JIT_CACHE_PIDS) {
+        g_jitPerPid.erase(g_pidLru.front());
+        g_pidLru.pop_front();
+    }
+    return g_jitPerPid[pid];
+}
+
+DfxJitDebug::JitCacheResult DfxJitDebug::LookupJitCache(uint64_t pc, std::shared_ptr<DfxElf>& elf,
+    uint64_t& loadBias)
+{
     bool hitCached = false;
     JitUID hitUid {};
     std::shared_ptr<DfxElf> hitElf;
     uint64_t hitLoadBias = 0;
     {
-        std::lock_guard<std::mutex> missLock(s_missMutex);
-        PerPidJitCache& bucket = acquireBucketLocked();
+        std::lock_guard<std::mutex> missLock(g_missMutex);
+        PerPidJitCache& bucket = AcquireJitBucketLocked(static_cast<uint32_t>(pid_));
         if (entries_.size() != bucket.entriesSizeWhenCached) {
             bucket.missedPcs.clear();
             bucket.hitPcs.clear();
             bucket.entriesSizeWhenCached = entries_.size();
         }
         if (bucket.missedPcs.find(pc) != bucket.missedPcs.end()) {
-            return false;
+            return JitCacheResult::KNOWN_MISS;
         }
         auto hit = bucket.hitPcs.find(pc);
         if (hit != bucket.hitPcs.end()) {
-            hitUid = std::get<0>(hit->second); // 0 : uid
-            hitElf = std::get<1>(hit->second); // 1 : elf
-            hitLoadBias = std::get<2>(hit->second); // 2 : load bias
+            hitUid = hit->second.uid;
+            hitElf = hit->second.elf;
+            hitLoadBias = hit->second.loadBias;
             hitCached = true;
         }
     }
@@ -546,35 +580,16 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
         if (CheckSeqlock(hitUid)) {
             elf = hitElf;
             loadBias = hitLoadBias;
-            return true;
+            return JitCacheResult::HIT;
         }
-        std::lock_guard<std::mutex> missLock(s_missMutex);
-        acquireBucketLocked().hitPcs.erase(pc);
+        std::lock_guard<std::mutex> missLock(g_missMutex);
+        AcquireJitBucketLocked(static_cast<uint32_t>(pid_)).hitPcs.erase(pc);
     }
+    return JitCacheResult::MISS;
+}
 
-    if (descriptorAddr_ == 0) {
-        if (!EnsureJitDescriptorLocked()) {
-            DFXLOGE("FindJitElf: FindJitDescriptor failed for pc=0x%{public}" PRIx64 "", pc);
-            return false;
-        }
-    } else {
-    }
-
-    for (const auto& it : entries_) {
-        const auto& jitElf = it.second;
-        if (jitElf != nullptr && jitElf->IsValid()) {
-            if (jitElf->IsValidPc(pc)) {
-                if (CheckSeqlock(it.first)) {
-                    elf = jitElf;
-                    loadBias = jitElf->GetLoadBias();
-                    return true;
-                }
-            }
-        }
-    }
-
-    bool readOk = ReadAllEntriesRaceRetry();
-
+bool DfxJitDebug::ScanEntriesForPc(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias)
+{
     for (const auto& it : entries_) {
         const auto& jitElf = it.second;
         if (jitElf == nullptr || !jitElf->IsValid()) {
@@ -585,24 +600,84 @@ bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t
                 continue;
             }
             elf = jitElf;
-            loadBias = jitElf->GetLoadBias();
+            loadBias = static_cast<uint64_t>(jitElf->GetLoadBias());
+            return true;
+        }
+    }
+    return false;
+}
+
+bool DfxJitDebug::ScanEntriesForPcAndCacheHit(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias)
+{
+    for (const auto& it : entries_) {
+        const auto& jitElf = it.second;
+        if (jitElf == nullptr || !jitElf->IsValid()) {
+            continue;
+        }
+        if (jitElf->IsValidPc(pc)) {
+            if (!CheckSeqlock(it.first)) {
+                continue;
+            }
+            elf = jitElf;
+            loadBias = static_cast<uint64_t>(jitElf->GetLoadBias());
             {
-                std::lock_guard<std::mutex> missLock(s_missMutex);
-                PerPidJitCache& bucket = acquireBucketLocked();
-                if (bucket.hitPcs.size() < kMaxPerPidEntries) {
-                    bucket.hitPcs[pc] = std::make_tuple(it.first, jitElf, loadBias);
+                std::lock_guard<std::mutex> missLock(g_missMutex);
+                PerPidJitCache& bucket = AcquireJitBucketLocked(static_cast<uint32_t>(pid_));
+                if (bucket.hitPcs.size() < MAX_JIT_CACHE_PER_PID_ENTRIES) {
+                    bucket.hitPcs[pc] = {it.first, jitElf, loadBias};
                 }
             }
             return true;
         }
     }
+    return false;
+}
+
+void DfxJitDebug::RecordJitMiss(uint64_t pc)
+{
+    std::lock_guard<std::mutex> missLock(g_missMutex);
+    PerPidJitCache& bucket = AcquireJitBucketLocked(static_cast<uint32_t>(pid_));
+    if (bucket.missedPcs.size() < MAX_JIT_CACHE_PER_PID_ENTRIES) {
+        bucket.missedPcs.insert(pc);
+    }
+}
+
+bool DfxJitDebug::FindJitElf(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias)
+{
+    std::lock_guard<std::mutex> guard(lock_);
+    if (descriptorPid_ != pid_) {
+        descriptorAddr_ = 0;
+        entries_.clear();
+        descriptorPid_ = pid_;
+    }
+
+    JitCacheResult cached = LookupJitCache(pc, elf, loadBias);
+    if (cached == JitCacheResult::HIT) {
+        return true;
+    }
+    if (cached == JitCacheResult::KNOWN_MISS) {
+        return false;
+    }
+
+    if (descriptorAddr_ == 0) {
+        if (!EnsureJitDescriptorLocked()) {
+            DFXLOGE("FindJitElf: FindJitDescriptor failed for pc=0x%{public}" PRIx64 "", pc);
+            return false;
+        }
+    }
+
+    if (ScanEntriesForPc(pc, elf, loadBias)) {
+        return true;
+    }
+
+    bool readOk = ReadAllEntriesRaceRetry();
+
+    if (ScanEntriesForPcAndCacheHit(pc, elf, loadBias)) {
+        return true;
+    }
 
     if (readOk) {
-        std::lock_guard<std::mutex> missLock(s_missMutex);
-        PerPidJitCache& bucket = acquireBucketLocked();
-        if (bucket.missedPcs.size() < kMaxPerPidEntries) {
-            bucket.missedPcs.insert(pc);
-        }
+        RecordJitMiss(pc);
     }
     DFXLOGE("FindJitElf: no JIT ELF found for pc=0x%{public}" PRIx64 ", entries=%{public}zu", pc, entries_.size());
     return false;

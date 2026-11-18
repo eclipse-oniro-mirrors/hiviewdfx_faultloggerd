@@ -92,7 +92,7 @@ bool DfxInstructions::GetCfa(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, R
             errCode = UNW_ERROR_DWARF_INVALID_CFA;
             return false;
         }
-        cfa = regs[rsState.cfaReg] + static_cast<int64_t>(rsState.cfaRegOffset);
+        cfa = regs[rsState.cfaReg] + static_cast<uint64_t>(rsState.cfaRegOffset);
     } else if (rsState.cfaExprPtr != 0) {
         bool cfaIsDexPc = false;
         cfaLoc.type = REG_LOC_VAL_EXPRESSION;
@@ -110,6 +110,34 @@ bool DfxInstructions::GetCfa(DfxRegs& regs, std::shared_ptr<DfxMemory> memory, R
     return true;
 }
 
+void DfxInstructions::UpdateRegsFromLocs(DfxRegs& regs, std::shared_ptr<DfxMemory> memory,
+    uintptr_t cfa, RegLocState& rsState)
+{
+    for (size_t i = 0; i < rsState.locs.size(); i++) {
+        RegLocEnum locType = rsState.locs[i].type;
+        if (locType == REG_LOC_UNUSED || locType == REG_LOC_UNDEFINED) {
+            continue;
+        }
+        if (i >= DfxRegsQut::GetQutRegs().size()) {
+            DFXLOGE("locs size %{public}zu exceeds qut regs size %{public}zu",
+                rsState.locs.size(), DfxRegsQut::GetQutRegs().size());
+            break;
+        }
+        size_t reg = DfxRegsQut::GetQutRegs()[i];
+        bool isDexPc = false;
+        uintptr_t val = 0;
+        if (!Flush(regs, memory, cfa, rsState.locs[i], val, isDexPc)) {
+            continue;
+        }
+        if (isDexPc) {
+            regs.SetDexPc(val);
+            regs.SetDexPcSeen(true);
+        } else {
+            regs[reg] = val;
+        }
+    }
+}
+
 bool DfxInstructions::Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, RegLocState& rsState, uint16_t& errCode)
 {
     uintptr_t cfa = 0;
@@ -117,22 +145,7 @@ bool DfxInstructions::Apply(std::shared_ptr<DfxMemory> memory, DfxRegs& regs, Re
         return false;
     }
 
-    for (size_t i = 0; i < rsState.locs.size(); i++) {
-        RegLocEnum locType = rsState.locs[i].type;
-        if (locType != REG_LOC_UNUSED && locType != REG_LOC_UNDEFINED) {
-            size_t reg = DfxRegsQut::GetQutRegs()[i];
-            bool isDexPc = false;
-            uintptr_t val = 0;
-            if (Flush(regs, memory, cfa, rsState.locs[i], val, isDexPc)) {
-                if (isDexPc) {
-                    regs.SetDexPc(val);
-                    regs.SetDexPcSeen(true);
-                } else {
-                    regs[reg] = val;
-                }
-            }
-        }
-    }
+    UpdateRegsFromLocs(regs, memory, cfa, rsState);
 
     regs.SetSp(cfa);
 

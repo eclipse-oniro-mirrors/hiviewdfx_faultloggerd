@@ -49,6 +49,7 @@ public:
 protected:
     static constexpr size_t STACK_SIZE_CHECK = 2;
     bool Decode(DfxRegs& regs, uintptr_t& addr);
+    bool ProbeDexPcMarker(uintptr_t& addr, uintptr_t end);
 
     inline void StackReset(AddressType initialStackValue)
     {

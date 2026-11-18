@@ -235,6 +235,7 @@ void ElfParser::GetAdltStrTabSectionInfo(uint64_t shOffset, uint64_t shSize)
         DFXLOGE("Get .adlt.strtab failed, offset: 0x%{public}" PRIx64 ", size: 0x%{public}" PRIx64, shOffset, shSize);
     } else {
         adltStrtab_ = std::string(tabBuf.begin(), tabBuf.begin() + shSize);
+        DFXLOGI("Get adlt.strtab success, len: %{public}" PRIuPTR, adltStrtab_.length());
     }
 }
 

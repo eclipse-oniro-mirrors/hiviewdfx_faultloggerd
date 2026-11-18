@@ -46,6 +46,7 @@ dfx_unwinder_sources = [
   "src/utils/stack_utils.cpp",
   "src/utils/unwinder_config.cpp",
   "unwinder.cpp",
+  "unwinder_art.cpp",
 ]
 
 dfx_exidx_sources = [ "src/unwind_entry_parser/exidx_entry_parser.cpp" ]

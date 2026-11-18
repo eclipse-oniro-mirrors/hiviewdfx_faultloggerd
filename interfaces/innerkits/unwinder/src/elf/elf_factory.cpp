@@ -44,6 +44,30 @@ namespace {
 #undef LOG_TAG
 #define LOG_DOMAIN 0xD002D11
 #define LOG_TAG "ElfFactory"
+
+bool ComputeEmbeddedElfSize(const uint8_t* data, size_t& elfSize)
+{
+    elfSize = 0;
+    uint8_t classType = data[EI_CLASS];
+    uint64_t elfSizeRaw = 0;
+    if (classType == ELFCLASS32) {
+        const Elf32_Ehdr* ehdr = reinterpret_cast<const Elf32_Ehdr *>(data);
+        uint64_t sectionSize = static_cast<uint64_t>(ehdr->e_shentsize) * ehdr->e_shnum;
+        if (__builtin_add_overflow(static_cast<uint64_t>(ehdr->e_shoff), sectionSize, &elfSizeRaw)) {
+            DFXLOGE("elf size overflow");
+            return false;
+        }
+    } else if (classType == ELFCLASS64) {
+        const Elf64_Ehdr* ehdr = reinterpret_cast<const Elf64_Ehdr *>(data);
+        uint64_t sectionSize = static_cast<uint64_t>(ehdr->e_shentsize) * ehdr->e_shnum;
+        if (__builtin_add_overflow(static_cast<uint64_t>(ehdr->e_shoff), sectionSize, &elfSizeRaw)) {
+            DFXLOGE("elf size overflow");
+            return false;
+        }
+    }
+    elfSize = static_cast<size_t>(elfSizeRaw);
+    return true;
+}
 }
 #if defined(ENABLE_MINIDEBUGINFO)
 std::shared_ptr<DfxElf> MiniDebugInfoFactory::Create()
@@ -249,25 +273,10 @@ std::shared_ptr<DfxElf> CompressHapElfFactory::LoadEmbeddedElf(int fd, uint64_t 
     if (data == nullptr || memcmp(data, ELFMAG, SELFMAG) != 0) {
         return nullptr;
     }
-    uint8_t classType = data[EI_CLASS];
     size_t elfSize = 0;
-    uint64_t elfSizeRaw = 0;
-    if (classType == ELFCLASS32) {
-        const Elf32_Ehdr* ehdr = reinterpret_cast<const Elf32_Ehdr *>(data);
-        uint64_t sectionSize = static_cast<uint64_t>(ehdr->e_shentsize) * ehdr->e_shnum;
-        if (__builtin_add_overflow(static_cast<uint64_t>(ehdr->e_shoff), sectionSize, &elfSizeRaw)) {
-            DFXLOGE("elf size overflow");
-            return nullptr;
-        }
-    } else if (classType == ELFCLASS64) {
-        const Elf64_Ehdr* ehdr = reinterpret_cast<const Elf64_Ehdr *>(data);
-        uint64_t sectionSize = static_cast<uint64_t>(ehdr->e_shentsize) * ehdr->e_shnum;
-        if (__builtin_add_overflow(static_cast<uint64_t>(ehdr->e_shoff), sectionSize, &elfSizeRaw)) {
-            DFXLOGE("elf size overflow");
-            return nullptr;
-        }
+    if (!ComputeEmbeddedElfSize(data, elfSize)) {
+        return nullptr;
     }
-    elfSize = static_cast<size_t>(elfSizeRaw);
     if (elfSize == 0) {
         DFXLOGE("elf size equal zero, invalid elf at offset 0x%{public}" PRIx64, offset);
         return nullptr;
