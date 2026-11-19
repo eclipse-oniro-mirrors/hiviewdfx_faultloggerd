@@ -98,6 +98,17 @@ private:
         NOT_PRESENT,
     };
 
+    enum class JitCacheResult {
+        HIT,
+        KNOWN_MISS,
+        MISS,
+    };
+
+    JitCacheResult LookupJitCache(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias);
+    bool ScanEntriesForPc(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias);
+    bool ScanEntriesForPcAndCacheHit(uint64_t pc, std::shared_ptr<DfxElf>& elf, uint64_t& loadBias);
+    void RecordJitMiss(uint64_t pc);
+
     bool EnsureJitDescriptorLocked();
 
     JitDescriptorStatus FindJitDescriptor();
@@ -109,6 +120,11 @@ private:
     bool ReadNextField(uint64_t fieldAddr, JitUID* uid, bool* race);
     bool CheckSeqlock(const JitUID& uid, bool* race = nullptr);
     bool LoadJitElf(uint64_t addr, uint64_t size, std::shared_ptr<DfxElf>& elf, const JitUID& uid);
+    bool ResolveEntryElf(const JitUID& uid, const JitCodeEntry& data,
+        std::map<JitUID, std::shared_ptr<DfxElf>>* entries, bool* race);
+    bool TrySetJitRangeFromTextSection(const std::shared_ptr<DfxElf>& elf);
+    bool TrySetJitRangeFromSymbols(const std::shared_ptr<DfxElf>& elf);
+    void SetJitRangeFromPtLoads(const std::shared_ptr<DfxElf>& elf);
     uint64_t StripAddressTag(uint64_t addr);
 
     bool ReadMemory(uint64_t addr, void* buf, size_t size);

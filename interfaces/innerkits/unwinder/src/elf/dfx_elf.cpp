@@ -622,7 +622,7 @@ struct DwarfEhFrameHdr* DfxElf::SynthEhFrameHdr(struct DwarfEhFrameHdr& synthHdr
     INSTR_STATISTIC(InstructionEntriesEhFrame, shdr.size, 0);
     synthHdr.version = DW_EH_VERSION;
     synthHdr.ehFramePtrEnc = DW_EH_PE_absptr |
-        ((sizeof(ElfW(Addr)) == 4) ? DW_EH_PE_udata4 : DW_EH_PE_udata8); // 4 : 32-bit address, 8 : 64-bit address
+        ((sizeof(ElfW(Addr)) == sizeof(uint32_t)) ? DW_EH_PE_udata4 : DW_EH_PE_udata8);
     synthHdr.fdeCountEnc = DW_EH_PE_omit;
     synthHdr.tableEnc = DW_EH_PE_omit;
     synthHdr.ehFrame = (ElfW(Addr))(shdr.offset + (char*)GetMmapPtr());
@@ -808,7 +808,7 @@ struct DwarfEhFrameHdr* DfxElf::InitHdr(struct DwarfEhFrameHdr& synthHdr,
             INSTR_STATISTIC(InstructionEntriesEhFrame, shdr.size, 0);
             synthHdr.version = DW_EH_VERSION;
             synthHdr.ehFramePtrEnc = DW_EH_PE_absptr |
-                ((sizeof(ElfW(Addr)) == 4) ? DW_EH_PE_udata4 : DW_EH_PE_udata8); // 4 : four bytes
+                ((sizeof(ElfW(Addr)) == sizeof(uint32_t)) ? DW_EH_PE_udata4 : DW_EH_PE_udata8);
             synthHdr.fdeCountEnc = DW_EH_PE_omit;
             synthHdr.tableEnc = DW_EH_PE_omit;
             synthHdr.ehFrame = (ElfW(Addr))(shdr.addr + info->dlpi_addr);

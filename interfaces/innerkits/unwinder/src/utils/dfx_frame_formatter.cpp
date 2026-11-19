@@ -29,6 +29,61 @@ namespace {
 #undef LOG_TAG
 #define LOG_DOMAIN 0xD002D11
 #define LOG_TAG "DfxFrameFormatter"
+
+#if defined(ENABLE_MIXSTACK)
+std::string FormatJsFrameStr(const DfxFrame& frame)
+{
+    std::string data = StringPrintf("#%02zu at", frame.index);
+    if (!frame.funcName.empty()) {
+        data.append(" " + frame.funcName);
+    }
+    if (!frame.packageName.empty()) {
+        data.append(" " + frame.packageName);
+    }
+    if (!frame.mapName.empty()) {
+        data += StringPrintf(" (%s:%d:%d)", frame.mapName.c_str(), frame.line, frame.column);
+    } else {
+        std::string mapName = frame.map == nullptr ? "" : frame.map->name;
+        data.append(" " + mapName);
+    }
+    return data;
+}
+#endif
+
+std::string FormatNativeFrameStr(const DfxFrame& frame, bool isContainer)
+{
+    std::string data;
+    uint64_t pc = frame.relPc == 0 ? frame.pc : frame.relPc;
+#ifdef __LP64__
+    data = StringPrintf("#%02zu pc %016" PRIx64, frame.index, pc);
+#else
+    data = StringPrintf("#%02zu pc %08" PRIx64, frame.index, pc);
+#endif
+    if (!frame.mapName.empty()) {
+        data += " " + DfxMap::UnFormatMapName(frame.mapName);
+        if (!frame.originSoName.empty()) {
+            data += ":" + frame.originSoName;
+        }
+    } else if (frame.map != nullptr && isContainer) {
+        data += StringPrintf(" <anonymous:%" PRIx64 ">", frame.map->begin);
+    } else {
+        data += " [Unknown]";
+    }
+    uint64_t elfOffset = (frame.map != nullptr) ? frame.map->elfOffset : 0;
+    if (elfOffset != 0 && isContainer) {
+        data += StringPrintf(" (offset 0x%" PRIx64 ")", elfOffset);
+    }
+    if (!frame.funcName.empty() &&
+        frame.funcName.length() <= MAX_FUNC_NAME_LEN) {
+        data += "(" + frame.funcName;
+        data += StringPrintf("+%" PRIu64, frame.funcOffset);
+        data += ")";
+    }
+    if (!frame.buildId.empty()) {
+        data += "(" + frame.buildId + ")";
+    }
+    return data;
+}
 }
 
 std::string DfxFrameFormatter::GetFrameStr(const DfxFrame& frame)
@@ -41,50 +96,10 @@ std::string DfxFrameFormatter::GetFrameStr(const DfxFrame& frame, bool isContain
     std::string data;
     if (frame.isJsFrame) {
 #if defined(ENABLE_MIXSTACK)
-        data = StringPrintf("#%02zu at", frame.index);
-        if (!frame.funcName.empty()) {
-            data.append(" " + frame.funcName);
-        }
-        if (!frame.packageName.empty()) {
-            data.append(" " + frame.packageName);
-        }
-        if (!frame.mapName.empty()) {
-            data += StringPrintf(" (%s:%d:%d)", frame.mapName.c_str(), frame.line, frame.column);
-        } else {
-            std::string mapName = frame.map == nullptr ? "" : frame.map->name;
-            data.append(" " + mapName);
-        }
+        data = FormatJsFrameStr(frame);
 #endif
     } else {
-        uint64_t pc = frame.relPc == 0 ? frame.pc : frame.relPc;
-#ifdef __LP64__
-        data = StringPrintf("#%02zu pc %016" PRIx64, frame.index, pc);
-#else
-        data = StringPrintf("#%02zu pc %08" PRIx64, frame.index, pc);
-#endif
-        if (!frame.mapName.empty()) {
-            data += " " + DfxMap::UnFormatMapName(frame.mapName);
-            if (!frame.originSoName.empty()) {
-                data += ":" + frame.originSoName;
-            }
-        } else if (frame.map != nullptr && isContainer) {
-            data += StringPrintf(" <anonymous:%" PRIx64 ">", frame.map->begin);
-        } else {
-            data += " [Unknown]";
-        }
-        uint64_t elfOffset = (frame.map != nullptr) ? frame.map->elfOffset : 0;
-        if (elfOffset != 0 && isContainer) {
-            data += StringPrintf(" (offset 0x%" PRIx64 ")", elfOffset);
-        }
-        if (!frame.funcName.empty() &&
-            frame.funcName.length() <= MAX_FUNC_NAME_LEN) {
-            data += "(" + frame.funcName;
-            data += StringPrintf("+%" PRIu64, frame.funcOffset);
-            data += ")";
-        }
-        if (!frame.buildId.empty()) {
-            data += "(" + frame.buildId + ")";
-        }
+        data = FormatNativeFrameStr(frame, isContainer);
     }
     data += "\n";
     return data;

@@ -40,6 +40,7 @@
 #include "string_util.h"
 #include "thread_context.h"
 #include "unwind_entry_parser_factory.h"
+#include "unwinder_art.h"
 
 namespace OHOS {
 namespace HiviewDFX {
@@ -72,17 +73,6 @@ private:
     bool forceSet_ {true};
     bool prev_ {false};
 };
-}
-
-static bool IsFileBackedMapName(std::string name)
-{
-    if (name.rfind("/proc/", 0) == 0) {
-        size_t pos = name.find("/root");
-        if (pos != std::string::npos) {
-            name = name.substr(pos + static_cast<size_t>(sizeof("/root")) - 1);
-        }
-    }
-    return !name.empty() && name[0] == '/' && name.find("/memfd:") == std::string::npos;
 }
 
 class Unwinder::Impl {
@@ -254,7 +244,6 @@ public:
     }
     void FillFrames(std::vector<DfxFrame>& frames);
     void FillFrame(DfxFrame& frame, bool needSymParse = true);
-    void FillDexFrame(DfxFrame& frame);
     void ParseFrameSymbol(DfxFrame& frame);
     void FillJsFrame(DfxFrame& frame);
     void FillArkwebJsFrame(DfxFrame& frame);
@@ -330,12 +319,16 @@ private:
     bool Apply(std::shared_ptr<DfxRegs> regs, std::shared_ptr<RegLocState> rs, uint16_t& errCode);
     bool UnwindFrame(void *ctx, StepFrame& frame, bool& needAdjustPc);
     bool TryJitStep(uintptr_t pc, void *ctx);
+    bool FinishStepInner(StepFrame& frame, void* ctx, bool& hasRegLocState,
+        std::shared_ptr<RegLocState>& rs, const std::shared_ptr<DfxMap>& map,
+        uintptr_t prevSp, uintptr_t prevPc);
+    bool PrepareStepInner(StepFrame& frame, void* ctx);
     bool StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDexPc, uintptr_t origXRefs);
+    void AddDexFrame(uintptr_t dexPc, uintptr_t nativeSp, const std::shared_ptr<DfxMap>& dexMap);
 #if defined(__aarch64__)
     uintptr_t sampleXRefs_ = 0;
 #endif
     void InjectDexFrameFromDwarf();
-    void TryJitSymbolLookup(DfxFrame& frame);
 #if defined(ENABLE_MIXSTACK)
     bool StepArkJsFrame(StepFrame& frame, uint64_t frameIndex = 0);
     int UnwindArkFrameByFp(StepFrame& frame, const ArkMapRange& arkMapRange, uint64_t& frameIndex);
@@ -405,6 +398,11 @@ Unwinder::Unwinder(bool needMaps) : impl_(std::make_shared<Impl>(needMaps))
 }
 
 // for remote
+Unwinder::Unwinder(int pid, bool crash, std::shared_ptr<DfxMaps> maps)
+    : Unwinder(pid, crash, maps, false)
+{
+}
+
 Unwinder::Unwinder(int pid, bool crash, std::shared_ptr<DfxMaps> maps, bool isContainer)
     : impl_(std::make_shared<Impl>(pid, crash, maps, isContainer))
 {
@@ -939,7 +937,7 @@ bool Unwinder::Impl::Unwind(void *ctx, size_t maxFrameNum, size_t skipFrameNum)
     }
 #endif
 #if defined(__aarch64__)
-    sampleXRefs_ = (*regs_)[25]; // 25 : register
+    sampleXRefs_ = (*regs_)[REG_AARCH64_X25];
 #endif
 
     bool needAdjustPc = false;
@@ -1248,8 +1246,8 @@ void Unwinder::Impl::UpdateRegsState(
 {
     SetLocalStackCheck(ctx, true);
 #if defined(__aarch64__)
-    uintptr_t origDexPc = (*regs_)[22];
-    uintptr_t origXRefs = (sampleXRefs_ != 0) ? sampleXRefs_ : (*regs_)[25];
+    uintptr_t origDexPc = (*regs_)[REG_AARCH64_X22];
+    uintptr_t origXRefs = (sampleXRefs_ != 0) ? sampleXRefs_ : (*regs_)[REG_AARCH64_X25];
 #endif
     MAYBE_UNUSED bool noCallerInCfi = false;
     MAYBE_UNUSED bool noUnwindTable = !unwinderResult;
@@ -1365,7 +1363,21 @@ void Unwinder::Impl::UpdateCache(uintptr_t pc, bool hasRegLocState, const std::s
     }
 }
 
-bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ctx)
+bool Unwinder::Impl::FinishStepInner(StepFrame& frame, void* ctx, bool& hasRegLocState,
+    std::shared_ptr<RegLocState>& rs, const std::shared_ptr<DfxMap>& map,
+    uintptr_t prevSp, uintptr_t prevPc)
+{
+    UpdateRegsState(frame, ctx, hasRegLocState, rs, map);
+    if (!CheckFrameValid(frame, map, prevSp)) {
+        return false;
+    }
+    if (hasRegLocState || frame.pc != prevPc) {
+        return true;
+    }
+    return false;
+}
+
+bool Unwinder::Impl::PrepareStepInner(StepFrame& frame, void* ctx)
 {
     if ((regs_ == nullptr) || (!CheckAndReset(ctx))) {
         DFXLOGE("params is nullptr");
@@ -1377,6 +1389,14 @@ bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ct
     SetLocalStackCheck(ctx, false);
     DFXLOGU("+pc: %{public}p, sp: %{public}p, fp: %{public}p", reinterpret_cast<void *>(frame.pc),
         reinterpret_cast<void *>(frame.sp), reinterpret_cast<void *>(frame.fp));
+    return true;
+}
+
+bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ctx)
+{
+    if (!PrepareStepInner(frame, ctx)) {
+        return false;
+    }
     uintptr_t prevPc = frame.pc;
     uintptr_t prevSp = frame.sp;
     bool hasRegLocState = false;
@@ -1427,14 +1447,7 @@ bool Unwinder::Impl::StepInner(const bool isSigFrame, StepFrame& frame, void *ct
     } while (false);
 
     // 5. update regs and regs state
-    UpdateRegsState(frame, ctx, hasRegLocState, rs, map);
-    if (!CheckFrameValid(frame, map, prevSp)) {
-        return false;
-    }
-    if (hasRegLocState || frame.pc != prevPc) {
-        return true;
-    }
-    return false;
+    return FinishStepInner(frame, ctx, hasRegLocState, rs, map, prevSp, prevPc);
 }
 
 bool Unwinder::Impl::Apply(std::shared_ptr<DfxRegs> regs, std::shared_ptr<RegLocState> rs, uint16_t& errCode)
@@ -1551,7 +1564,7 @@ void Unwinder::Impl::FillFrames(std::vector<DfxFrame>& frames)
         } else if (frame.frameType == FrameType::ARKWEB_JS_FRAME) {
             FillArkwebJsFrame(frame);
         } else if (frame.frameType == FrameType::DEX_FRAME) {
-            FillDexFrame(frame);
+            ArtUnwind::FillDexFrame(frame);
         } else {
             FillFrame(frame, enableParseNativeSymbol_);
         }
@@ -1567,13 +1580,13 @@ void Unwinder::Impl::ParseFrameSymbol(DfxFrame& frame)
     auto elf = frame.map->GetElf(pid);
     if (elf == nullptr) {
         if (isContainerPid_) {
-            TryJitSymbolLookup(frame);
+            ArtUnwind::TryJitSymbolLookup(jitDebug_, memory_, maps_, pid_, frame);
         }
         return;
     }
     if (!DfxSymbols::GetFuncNameAndOffsetByPc(frame.relPc, elf, frame.funcName, frame.funcOffset)) {
         if (isContainerPid_) {
-            TryJitSymbolLookup(frame);
+            ArtUnwind::TryJitSymbolLookup(jitDebug_, memory_, maps_, pid_, frame);
         }
         DFXLOGU("Failed to get symbol, relPc: 0x%{public}" PRIx64 ", pc: 0x%{public}" PRIx64 ", mapName: %{public}s",
             frame.relPc, frame.pc, frame.mapName.c_str());
@@ -1581,43 +1594,6 @@ void Unwinder::Impl::ParseFrameSymbol(DfxFrame& frame)
     frame.parseSymbolState.SetParseSymbolState(true);
 }
 
-void Unwinder::Impl::TryJitSymbolLookup(DfxFrame& frame)
-{
-    if (frame.map != nullptr && IsFileBackedMapName(frame.map->name)) {
-        return;
-    }
-    auto& jitDebug = jitDebug_;
-    jitDebug.SetMemory(memory_);
-    jitDebug.SetMaps(maps_);
-    jitDebug.SetPid(pid_);
-#if defined(__aarch64__)
-    jitDebug.SetArch(ARCH_ARM64);
-#else
-    return;
-#endif
-
-    JitSymbolInfo info;
-    if (!jitDebug.GetJitSymbolInfo(frame.pc, info)) {
-        return;
-    }
-
-    if (info.elf == nullptr || !info.elf->IsValid()) {
-        return;
-    }
-
-    uint64_t relPc = frame.pc;
-    if (info.loadBias != 0 && info.loadBias != static_cast<uint64_t>(-1)) {
-        relPc = frame.pc - info.loadBias;
-    } else {
-        relPc = frame.pc - info.startPc;
-    }
-
-    if (!DfxSymbols::GetFuncNameAndOffsetByPc(relPc, info.elf, frame.funcName, frame.funcOffset)) {
-        return;
-    }
-
-    frame.parseSymbolState.SetParseSymbolState(true);
-}
 
 bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
 {
@@ -1625,7 +1601,7 @@ bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
     if (maps_ != nullptr) {
         std::shared_ptr<DfxMap> map;
         if (memory_->GetMapByPc(pc, map) == UNW_ERROR_NONE && map != nullptr &&
-            IsFileBackedMapName(map->name)) {
+            ArtUnwind::IsFileBackedMapName(map->name)) {
             return false;
         }
     }
@@ -1653,21 +1629,7 @@ bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
     }
 
     UnwindTableInfo uti;
-    std::shared_ptr<DfxMap> tmpMap = std::make_shared<DfxMap>();
-    if (jitElf->HasRuntimeRange()) {
-        tmpMap->begin = 0;
-        tmpMap->end = 0;
-    } else {
-        tmpMap->begin = jitElf->GetStartVaddr() + loadBias;
-        tmpMap->end = jitElf->GetEndVaddr() + loadBias;
-    }
-    tmpMap->offset = 0;
-    tmpMap->name = "[jit]";
-
-    int utiRet = jitElf->FindUnwindTableInfo(pc, tmpMap, uti);
-    if (utiRet != UNW_ERROR_NONE) {
-        DFXLOGU("TryJitStep: Failed to find unwind table in JIT ELF, ret: %{public}d, pc: 0x%{public}" PRIx64 "",
-            utiRet, (uint64_t)pc);
+    if (!ArtUnwind::BuildJitUnwindTable(pc, jitElf, loadBias, uti)) {
         return false;
     }
 
@@ -1689,7 +1651,19 @@ bool Unwinder::Impl::TryJitStep(uintptr_t pc, void *ctx)
     return ret;
 }
 
-bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDexPc, uintptr_t origXRefs)
+
+void Unwinder::Impl::AddDexFrame(uintptr_t dexPc, uintptr_t nativeSp, const std::shared_ptr<DfxMap>& dexMap)
+{
+    StepFrame dexFrame;
+    dexFrame.pc = dexPc;
+    dexFrame.sp = nativeSp;
+    dexFrame.fp = 0;
+    dexFrame.frameType = FrameType::DEX_FRAME;
+    AddFrame(dexFrame, dexMap);
+}
+
+bool Unwinder::Impl::StepNterp(MAYBE_UNUSED uintptr_t pc, MAYBE_UNUSED uintptr_t origSp,
+    MAYBE_UNUSED uintptr_t origDexPc, MAYBE_UNUSED uintptr_t origXRefs)
 {
     DFX_TRACE_SCOPED_DLSYM("StepNterp:%p", reinterpret_cast<void *>(pc));
 #if defined(__aarch64__)
@@ -1702,89 +1676,33 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
         return false;
     }
 
-    auto pos = map->name.rfind('/');
-    std::string baseName = (pos == std::string::npos) ? map->name : map->name.substr(pos + 1);
-
-    std::string libArtName = std::string("lib") + "art" + ".so";
-    std::string libArtdName = std::string("lib") + "artd" + ".so";
-    if (baseName != libArtName && baseName != libArtdName) {
+    if (!ArtUnwind::IsArtInterpMap(map)) {
         return false;
     }
 
     bool dexPcValid = false;
-    std::string dexMapName;
     std::shared_ptr<DfxMap> dexMap;
-    uintptr_t effectiveDexPc = regs_->DexPc();
-    if (effectiveDexPc == 0) {
-        effectiveDexPc = origDexPc;
-    }
-    if (effectiveDexPc != 0) {
-        if (maps_->FindMapByAddr(static_cast<uintptr_t>(effectiveDexPc), dexMap) && dexMap != nullptr) {
-            const std::string& n = dexMap->name;
-            dexMapName = n;
-            dexPcValid = n.find(".vdex") != std::string::npos ||
-                       EndsWith(n, ".dex") || EndsWith(n, ".apk") ||
-                       StartsWith(n, "[anon:dalvik") ||
-                       (n.empty() && dexMap->IsMapExec());
-        }
-    }
+    uintptr_t effectiveDexPc = ArtUnwind::ResolveDexPcAnchor(regs_, maps_, origDexPc, dexMap, dexPcValid);
     bool isNterp = regs_->DexPcSeen() || dexPcValid;
     if (!isNterp) {
         return false;
     }
     regs_->ClearDexPc();
 
-    uintptr_t xRefs = origXRefs;
-
     uintptr_t savedSp = 0;
-    if (xRefs != 0) {
-        uintptr_t refsAddr = xRefs - 8; // 8 : saved_sp offset
-        if (!memory_->Read<uintptr_t>(refsAddr, &savedSp, false)) {
-            DFXLOGU("StepNterp: failed to read saved_sp at [xREFS-8]=0x%{public}" PRIx64 "", (uint64_t)refsAddr);
-            return false;
-        }
-    }
-    if (savedSp == 0) {
-        DFXLOGU("StepNterp: saved_sp is 0, cannot locate callee-saves frame");
-        return false;
-    }
-
     uintptr_t nativeLr = 0;
-    uintptr_t lrAddr = savedSp + 152; // 152 : callee-saves frame offset
-    if (!memory_->Read<uintptr_t>(lrAddr, &nativeLr, false)) {
-        DFXLOGU("StepNterp: failed to read native lr at saved_sp+152=0x%{public}" PRIx64 "", (uint64_t)lrAddr);
+    uintptr_t nativeSp = 0;
+    if (!ArtUnwind::ReadNterpFrameLayout(memory_, origXRefs, savedSp, nativeLr, nativeSp)) {
         return false;
     }
-    uintptr_t nativeSp = savedSp + 176; // 176 : callee-saves frame size
 
     uintptr_t dexPc = effectiveDexPc;
     if (!dexPcValid) {
-        uintptr_t savedDexPc = 0;
-        uintptr_t savedDexPcAddr = savedSp + 88;
-        if (memory_->Read<uintptr_t>(savedDexPcAddr, &savedDexPc, false) && savedDexPc != 0) {
-            std::shared_ptr<DfxMap> savedDexMap;
-            if (maps_->FindMapByAddr(static_cast<uintptr_t>(savedDexPc), savedDexMap) && savedDexMap != nullptr) {
-                const std::string& sn = savedDexMap->name;
-                bool savedDexPcValid = sn.find(".vdex") != std::string::npos ||
-                    EndsWith(sn, ".dex") || EndsWith(sn, ".apk") ||
-                    StartsWith(sn, "[anon:dalvik") ||
-                    (sn.empty() && savedDexMap->IsMapExec());
-                if (savedDexPcValid) {
-                    dexPc = savedDexPc;
-                    dexMap = savedDexMap;
-                    dexPcValid = true;
-                }
-            }
-        }
+        ArtUnwind::FallbackToSavedDexPc(memory_, maps_, savedSp, dexPc, dexMap, dexPcValid);
     }
 
     if (dexPc != 0 && dexPcValid && dexMap != nullptr) {
-        StepFrame dexFrame;
-        dexFrame.pc = dexPc;
-        dexFrame.sp = nativeSp;
-        dexFrame.fp = 0;
-        dexFrame.frameType = FrameType::DEX_FRAME;
-        AddFrame(dexFrame, dexMap);
+        AddDexFrame(dexPc, nativeSp, dexMap);
     } else if (dexPc != 0) {
     }
 
@@ -1796,10 +1714,6 @@ bool Unwinder::Impl::StepNterp(uintptr_t pc, uintptr_t origSp, uintptr_t origDex
     regs_->SetSp(nativeSp);
     return true;
 #else
-    (void)pc;
-    (void)origSp;
-    (void)origDexPc;
-    (void)origXRefs;
     return false;
 #endif
 }
@@ -1851,7 +1765,7 @@ void Unwinder::Impl::FillFrame(DfxFrame& frame, bool needSymParse)
     frame.mapOffset = frame.map->offset;
     if (elf == nullptr) {
         if (needSymParse && isContainerPid_) {
-            TryJitSymbolLookup(frame);
+            ArtUnwind::TryJitSymbolLookup(jitDebug_, memory_, maps_, pid_, frame);
         }
         return;
     }
@@ -1869,17 +1783,6 @@ void Unwinder::Impl::FillFrame(DfxFrame& frame, bool needSymParse)
     DFXLOGU("mapName: %{public}s, mapOffset: %{public}" PRIx64 "", frame.mapName.c_str(), frame.mapOffset);
 }
 
-void Unwinder::Impl::FillDexFrame(DfxFrame& frame)
-{
-    if (frame.map == nullptr) {
-        frame.relPc = frame.pc;
-        frame.mapName = "Not mapped";
-        return;
-    }
-    frame.mapName = frame.map->GetElfName();
-    frame.relPc = frame.pc - frame.map->begin;
-    frame.mapOffset = frame.map->offset;
-}
 
 void Unwinder::Impl::FillArkwebJsFrame(DfxFrame& frame)
 {

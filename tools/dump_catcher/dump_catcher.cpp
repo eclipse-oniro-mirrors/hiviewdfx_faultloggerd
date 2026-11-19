@@ -235,7 +235,7 @@ void DumpCatcher::DumpContainerStack(const DumpOptions& dumpOpt) const
     auto unwinder = std::make_shared<Unwinder>(dumpOpt.pid, true, nullptr, true);
     unwinder->SetIsContainerPid(true);
 
-    auto unwindSingleThread = [&](pid_t tid) -> std::string {
+    auto unwindSingleThread = [&unwinder](pid_t tid) -> std::string {
         if (!DfxPtrace::Attach(tid)) {
             printf("Failed to attach tid %d\n", tid);
             return "";
@@ -258,7 +258,7 @@ void DumpCatcher::DumpContainerStack(const DumpOptions& dumpOpt) const
         framesStr = unwindSingleThread(dumpOpt.tid);
     } else {
         std::vector<int> tids;
-        std::function<bool(int)> unwindFunc = [&](int tid) -> bool {
+        std::function<bool(int)> unwindFunc = [&framesStr, &unwindSingleThread](int tid) -> bool {
             if (tid <= 0) {
                 return false;
             }

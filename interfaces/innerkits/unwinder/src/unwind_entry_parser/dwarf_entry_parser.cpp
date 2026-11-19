@@ -30,6 +30,41 @@ namespace {
 #define LOG_DOMAIN 0xD002D11
 #define LOG_TAG "DfxDwarfEntryParser"
 }
+bool DwarfEntryParser::LinearSearchSmallSection(uintptr_t pc, uintptr_t tableData,
+    uintptr_t endBoundary, uintptr_t fdeCount, UnwindEntryInfo& uei)
+{
+    uintptr_t i = 0;
+    uintptr_t ptr = tableData;
+    FrameDescEntry fdeInfo;
+    while (i++ < fdeCount && ptr < endBoundary) {
+        uintptr_t fdeAddr = ptr;
+        if (GetCieOrFde(ptr, fdeInfo)) {
+            if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
+                uei.unwindInfo = (void *)(fdeAddr);
+                uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
+                return true;
+            }
+        } else {
+            break;
+        }
+    }
+    return false;
+}
+
+const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::FindCachedFdeIndex(
+    uintptr_t tableData, uintptr_t mmapId)
+{
+    for (auto it = fdeIndexCache_.begin(); it != fdeIndexCache_.end(); ++it) {
+        if (it->tableData == tableData && it->mmapId == mmapId) {
+            if (it != fdeIndexCache_.begin()) {
+                fdeIndexCache_.splice(fdeIndexCache_.begin(), fdeIndexCache_, it);
+            }
+            return &(fdeIndexCache_.front().entries);
+        }
+    }
+    return nullptr;
+}
+
 bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei,
     const FrameDescEntry** cachedFde)
 {
@@ -52,35 +87,10 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
         smallSection = true;
     }
     if (smallSection) {
-        uintptr_t fdeCount = uti.tableLen;
-        uintptr_t i = 0;
-        uintptr_t ptr = tableData;
-        FrameDescEntry fdeInfo;
-        while (i++ < fdeCount && ptr < endBoundary) {
-            uintptr_t fdeAddr = ptr;
-            if (GetCieOrFde(ptr, fdeInfo)) {
-                if (pc >= fdeInfo.pcStart && pc < fdeInfo.pcEnd) {
-                    uei.unwindInfo = (void *)(fdeAddr);
-                    uei.format = UNW_INFO_FORMAT_REMOTE_TABLE;
-                    return true;
-                }
-            } else {
-                break;
-            }
-        }
-        return false;
+        return LinearSearchSmallSection(pc, tableData, endBoundary, uti.tableLen, uei);
     }
 
-    const std::vector<FdeIndexEntry>* index = nullptr;
-    for (auto it = fdeIndexCache_.begin(); it != fdeIndexCache_.end(); ++it) {
-        if (it->tableData == tableData && it->mmapId == mmapId) {
-            if (it != fdeIndexCache_.begin()) {
-                fdeIndexCache_.splice(fdeIndexCache_.begin(), fdeIndexCache_, it);
-            }
-            index = &(fdeIndexCache_.front().entries);
-            break;
-        }
-    }
+    const std::vector<FdeIndexEntry>* index = FindCachedFdeIndex(tableData, mmapId);
     if (index == nullptr) {
         index = BuildFdeIndex(uti);
     }
@@ -89,8 +99,9 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
     }
     auto it = std::upper_bound(index->begin(), index->end(), pc,
         [](uintptr_t value, const FdeIndexEntry& entry) { return value < entry.pcEnd; });
+    constexpr size_t kMaxIndexScanCount = 256;
     size_t scanned = 0;
-    for (; it != index->end() && scanned < 256; ++it, ++scanned) { // 256 : max scanned
+    for (; it != index->end() && scanned < kMaxIndexScanCount; ++it, ++scanned) {
         if (pc >= it->pcStart && pc < it->pcEnd) {
             uei.unwindInfo = (void *)(it->fdeAddr);
             *cachedFde = it->entry;
@@ -110,8 +121,6 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
     const uintptr_t mmapId = uti.isDebugFrame
         ? reinterpret_cast<uintptr_t>(uti.debugFrameMmap.get()) : 0;
     constexpr size_t maxSectionEntries = 512 * 1024;
-    constexpr size_t maxCachedSections = 32;
-    constexpr size_t maxTotalEntries = 1024 * 1024;
 
     std::vector<FdeIndexEntry> entries;
     uintptr_t i = 0;
@@ -145,6 +154,14 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
     std::sort(entries.begin(), entries.end(),
         [](const FdeIndexEntry& a, const FdeIndexEntry& b) { return a.pcEnd < b.pcEnd; });
     fdeIndexCache_.push_front({tableData, mmapId, std::move(entries)});
+    TrimFdeIndexCache();
+    return &fdeIndexCache_.front().entries;
+}
+
+void DwarfEntryParser::TrimFdeIndexCache()
+{
+    constexpr size_t maxCachedSections = 32;
+    constexpr size_t maxTotalEntries = 1024 * 1024;
     size_t total = fdeIndexCache_.front().entries.size();
     for (auto& section : fdeIndexCache_) {
         if (&section != &fdeIndexCache_.front()) {
@@ -156,7 +173,6 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
         total -= fdeIndexCache_.back().entries.size();
         fdeIndexCache_.pop_back();
     }
-    return &fdeIndexCache_.front().entries;
 }
 
 bool DwarfEntryParser::SearchEntry(uintptr_t pc, const UnwindTableInfo& uti, UnwindEntryInfo& uei)
@@ -373,7 +389,8 @@ bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEn
         DFXLOGE("ParseFde error, failed to fill FDE? fdeAddr: 0x%{public}" PRIx64 "", (uint64_t)fdeAddr);
         {
             std::lock_guard<std::mutex> lock(s_failMutex);
-            if (s_failedFdes.size() < 8192) { // 8192 : max failed fde cache
+            constexpr size_t kMaxFailedFdeCache = 8192;
+            if (s_failedFdes.size() < kMaxFailedFdeCache) {
                 s_failedFdes[fdeAddr] = entriesOffset_;
             }
         }

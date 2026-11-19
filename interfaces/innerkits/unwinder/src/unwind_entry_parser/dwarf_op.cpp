@@ -27,6 +27,32 @@ namespace {
 }
 
 template <typename AddressType>
+bool DwarfOp<AddressType>::ProbeDexPcMarker(uintptr_t& addr, uintptr_t end)
+{
+    // minimum bytes to read a dex pc marker: op1(1) + DEX magic(4) + op2(1)
+    constexpr size_t kDexPcMarkerMinLen = 6;
+    if (end <= addr || (end - addr) < kDexPcMarkerMinLen) {
+        return false;
+    }
+    uintptr_t probe = addr;
+    uint8_t op1 = 0;
+    if (!memory_->Read<uint8_t>(probe, &op1, true) || op1 != 0x0c) {
+        return false;
+    }
+    uint32_t magic = 0;
+    if (!memory_->Read<uint32_t>(probe, &magic, true) || magic != 0x31584544U) {
+        return false;
+    }
+    uint8_t op2 = 0;
+    if (!memory_->Read<uint8_t>(probe, &op2, true) || op2 != 0x13) {
+        return false;
+    }
+    dexPcSet_ = true;
+    addr = probe;
+    return true;
+}
+
+template <typename AddressType>
 AddressType DwarfOp<AddressType>::Eval(DfxRegs& regs, AddressType initStackValue, AddressType startPtr)
 {
     dexPcSet_ = false;
@@ -36,21 +62,7 @@ AddressType DwarfOp<AddressType>::Eval(DfxRegs& regs, AddressType initStackValue
     uintptr_t length = memory_->ReadUleb128(addr);
     uintptr_t end = addr + length;
 
-    if (end > addr && (end - addr) >= 6) { // 6 : minimum length of dex pc marker
-        uintptr_t probe = addr;
-        uint8_t op1 = 0;
-        if (memory_->Read<uint8_t>(probe, &op1, true) && op1 == 0x0c) {
-            uint32_t magic = 0;
-            if (memory_->Read<uint32_t>(probe, &magic, true) &&
-                magic == 0x31584544U) {
-                uint8_t op2 = 0;
-                if (memory_->Read<uint8_t>(probe, &op2, true) && op2 == 0x13) {
-                    dexPcSet_ = true;
-                    addr = probe;
-                }
-            }
-        }
-    }
+    ProbeDexPcMarker(addr, end);
 
     while (addr < end) {
         if (!Decode(regs, addr)) {

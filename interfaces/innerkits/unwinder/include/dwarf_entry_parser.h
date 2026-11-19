@@ -61,6 +61,10 @@ private:
     };
     std::list<SectionIndex> fdeIndexCache_;
     const std::vector<FdeIndexEntry>* BuildFdeIndex(const UnwindTableInfo& uti);
+    void TrimFdeIndexCache();
+    bool LinearSearchSmallSection(uintptr_t pc, uintptr_t tableData,
+        uintptr_t endBoundary, uintptr_t fdeCount, UnwindEntryInfo& uei);
+    const std::vector<FdeIndexEntry>* FindCachedFdeIndex(uintptr_t tableData, uintptr_t mmapId);
     bool GetCieOrFde(uintptr_t& addr, FrameDescEntry& fdeInfo);
     void ParseCieOrFdeHeader(uintptr_t& ptr, FrameDescEntry& fdeInfo, bool& isCieEntry);
     bool FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo);

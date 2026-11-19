@@ -34,8 +34,10 @@ public:
     bool Parse(uintptr_t pc, const FrameDescEntry& fde, RegLocState& rsState);
 
 private:
-    bool Iterate(uintptr_t pc, const FrameDescEntry& fde, uintptr_t instStart, uintptr_t instEnd, RegLocState &rsState);
-    bool DecodeDwCfa(uint8_t op, const CommonInfoEntry& cie, uintptr_t& pcOffset, uintptr_t& instPtr, RegLocState &rsState);
+    bool Iterate(uintptr_t pc, const FrameDescEntry& fde, uintptr_t instStart, uintptr_t instEnd,
+        RegLocState &rsState);
+    bool DecodeDwCfa(uint8_t op, const CommonInfoEntry& cie, uintptr_t& pcOffset, uintptr_t& instPtr,
+        RegLocState &rsState);
 
 private:
     std::shared_ptr<DfxMemory> memory_;
