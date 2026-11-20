@@ -99,9 +99,9 @@ bool DwarfEntryParser::LinearSearchEntry(uintptr_t pc, const UnwindTableInfo& ut
     }
     auto it = std::upper_bound(index->begin(), index->end(), pc,
         [](uintptr_t value, const FdeIndexEntry& entry) { return value < entry.pcEnd; });
-    constexpr size_t kMaxIndexScanCount = 256;
+    constexpr size_t maxIndexScanCount = 256;
     size_t scanned = 0;
-    for (; it != index->end() && scanned < kMaxIndexScanCount; ++it, ++scanned) {
+    for (; it != index->end() && scanned < maxIndexScanCount; ++it, ++scanned) {
         if (pc >= it->pcStart && pc < it->pcEnd) {
             uei.unwindInfo = (void *)(it->fdeAddr);
             *cachedFde = it->entry;
@@ -389,8 +389,8 @@ bool DwarfEntryParser::ParseFde(uintptr_t fdeAddr, uintptr_t fdePtr, FrameDescEn
         DFXLOGE("ParseFde error, failed to fill FDE? fdeAddr: 0x%{public}" PRIx64 "", (uint64_t)fdeAddr);
         {
             std::lock_guard<std::mutex> lock(s_failMutex);
-            constexpr size_t kMaxFailedFdeCache = 8192;
-            if (s_failedFdes.size() < kMaxFailedFdeCache) {
+            constexpr size_t maxFailedFdeCache = 8192;
+            if (s_failedFdes.size() < maxFailedFdeCache) {
                 s_failedFdes[fdeAddr] = entriesOffset_;
             }
         }

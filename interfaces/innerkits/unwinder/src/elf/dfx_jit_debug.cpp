@@ -137,8 +137,8 @@ bool DfxJitDebug::ReadU32(uint64_t addr, uint32_t* val)
 uint64_t DfxJitDebug::StripAddressTag(uint64_t addr)
 {
     if (arch_ == ARCH_ARM64) {
-        constexpr uint64_t kArm64TagBits = 8;
-        return (addr << kArm64TagBits) >> kArm64TagBits;
+        constexpr uint64_t arm64TagBits = 8;
+        return (addr << arm64TagBits) >> arm64TagBits;
     }
     return addr;
 }
@@ -263,11 +263,11 @@ bool DfxJitDebug::ReadDescriptor()
 
 bool DfxJitDebug::ReadNextField(uint64_t fieldAddr, JitUID* uid, bool* race)
 {
-    constexpr int kSeqlockReadCount = 2;
-    uint64_t address[kSeqlockReadCount] = {0, 0};
-    uint32_t seqlock[kSeqlockReadCount] = {0, 0};
+    constexpr int seqlockReadCount = 2;
+    uint64_t address[seqlockReadCount] = {0, 0};
+    uint32_t seqlock[seqlockReadCount] = {0, 0};
 
-    for (int i = 0; i < kSeqlockReadCount; i++) {
+    for (int i = 0; i < seqlockReadCount; i++) {
         if (!ReadU64(fieldAddr, &address[i])) {
             return false;
         }
@@ -517,6 +517,7 @@ bool DfxJitDebug::ReadAllEntriesRaceRetry()
     return false;
 }
 
+namespace {
 struct JitPcHit {
     JitUID uid;
     std::shared_ptr<DfxElf> elf;
@@ -528,6 +529,7 @@ struct PerPidJitCache {
     std::unordered_set<uint64_t> missedPcs;
     size_t entriesSizeWhenCached = 0;
 };
+} // namespace
 
 static std::mutex g_missMutex;
 static std::unordered_map<uint32_t, PerPidJitCache> g_jitPerPid;

@@ -1703,7 +1703,6 @@ bool Unwinder::Impl::StepNterp(MAYBE_UNUSED uintptr_t pc, MAYBE_UNUSED uintptr_t
 
     if (dexPc != 0 && dexPcValid && dexMap != nullptr) {
         AddDexFrame(dexPc, nativeSp, dexMap);
-    } else if (dexPc != 0) {
     }
 
     if (nativeLr == 0) {

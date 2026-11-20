@@ -21,13 +21,13 @@
 #include <string>
 
 #include "dfx_elf.h"
+#include "dfx_frame.h"
 #include "dfx_jit_debug.h"
 #include "dfx_map.h"
 #include "dfx_maps.h"
 #include "dfx_memory.h"
 #include "dfx_regs.h"
 #include "unwind_context.h"
-#include "unwinder.h"
 
 namespace OHOS {
 namespace HiviewDFX {
