@@ -30,21 +30,22 @@ template <typename AddressType>
 bool DwarfOp<AddressType>::ProbeDexPcMarker(uintptr_t& addr, uintptr_t end)
 {
     // minimum bytes to read a dex pc marker: op1(1) + DEX magic(4) + op2(1)
-    constexpr size_t kDexPcMarkerMinLen = 6;
-    if (end <= addr || (end - addr) < kDexPcMarkerMinLen) {
+    constexpr size_t dexPcMarkerMinLen = 6;
+    constexpr uint32_t dexPcMarkerMagic = 0x31584544U; // "DEX1" marker magic
+    if (end <= addr || (end - addr) < dexPcMarkerMinLen) {
         return false;
     }
     uintptr_t probe = addr;
     uint8_t op1 = 0;
-    if (!memory_->Read<uint8_t>(probe, &op1, true) || op1 != 0x0c) {
+    if (!memory_->Read<uint8_t>(probe, &op1, true) || op1 != DW_OP_const4u) {
         return false;
     }
     uint32_t magic = 0;
-    if (!memory_->Read<uint32_t>(probe, &magic, true) || magic != 0x31584544U) {
+    if (!memory_->Read<uint32_t>(probe, &magic, true) || magic != dexPcMarkerMagic) {
         return false;
     }
     uint8_t op2 = 0;
-    if (!memory_->Read<uint8_t>(probe, &op2, true) || op2 != 0x13) {
+    if (!memory_->Read<uint8_t>(probe, &op2, true) || op2 != DW_OP_drop) {
         return false;
     }
     dexPcSet_ = true;
