@@ -704,6 +704,34 @@ HWTEST_F(MapsTest, GetElfNameApkHapTest001, TestSize.Level2)
 }
 
 /**
+ * @tc.name: GetElfNameHspHqfTest001
+ * @tc.desc: test GetElfName appends the inner elf name for hsp and hqf containers
+ * @tc.type: FUNC
+ */
+HWTEST_F(MapsTest, GetElfNameHspHqfTest001, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "GetElfNameHspHqfTest001: start.";
+    CraftedElfOptions opt;
+    opt.withText = true;
+    opt.withSoname = true;
+    auto image = ElfCraftBuilder::Build(opt);
+    auto mmap = std::make_shared<DfxMmap>();
+    ASSERT_TRUE(mmap->Init(std::move(image)));
+    auto craftedElf = std::make_shared<DfxElf>(mmap);
+    ASSERT_TRUE(craftedElf->IsValid());
+    EXPECT_EQ(craftedElf->GetElfName(), "libcrafted.z.so");
+
+    auto hspMap = std::make_shared<DfxMap>(0x7000000, 0x7001000, 0, PROT_READ, "/data/app/el1/bundle/test.hsp");
+    hspMap->elf = craftedElf;
+    EXPECT_EQ(hspMap->GetElfName(), "/data/app/el1/bundle/test.hsp!libcrafted.z.so");
+
+    auto hqfMap = std::make_shared<DfxMap>(0x7001000, 0x7002000, 0, PROT_READ, "/data/app/el1/bundle/test.hqf");
+    hqfMap->elf = craftedElf;
+    EXPECT_EQ(hqfMap->GetElfName(), "/data/app/el1/bundle/test.hqf!libcrafted.z.so");
+    GTEST_LOG_(INFO) << "GetElfNameHspHqfTest001: end.";
+}
+
+/**
  * @tc.name: IsLegalMapItemMemfdTest001
  * @tc.desc: test IsLegalMapItem accepts memfd names and rejects special files
  * @tc.type: FUNC

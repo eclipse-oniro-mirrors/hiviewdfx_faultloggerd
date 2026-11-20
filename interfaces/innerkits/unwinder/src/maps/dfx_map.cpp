@@ -401,7 +401,7 @@ std::string DfxMap::GetElfName()
         return name;
     }
     std::string soName = name;
-    if (EndsWith(name, ".hap") || EndsWith(name, ".apk")) {
+    if (IsHapLikeFile(name) || EndsWith(name, ".apk")) {
         std::string inner = elf->GetElfName();
         if (!inner.empty()) {
             soName.append("!" + inner);
