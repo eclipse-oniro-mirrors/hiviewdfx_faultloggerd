@@ -91,7 +91,7 @@ static void TimerCallback(uv_timer_t* handle)
 HWTEST_F(SubmitterStackTest, SubmitterStackTest001, TestSize.Level2)
 {
     GTEST_LOG_(INFO) << "SubmitterStackTest001: start.";
-    DfxInitAsyncStack();
+    DfxInitAsyncStackWithDebug(true);
     uv_timer_t timerHandle;
     uv_work_t work;
     uv_loop_t* loop = uv_default_loop();
