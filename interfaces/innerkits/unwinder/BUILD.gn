@@ -16,6 +16,7 @@ import("//base/hiviewdfx/faultloggerd/faultloggerd.gni")
 dfx_unwinder_sources = [
   "src/ark/dfx_ark.cpp",
   "src/ark/dfx_hap.cpp",
+  "src/art/dfx_art.cpp",
   "src/elf/dfx_elf.cpp",
   "src/elf/dfx_elf_parser.cpp",
   "src/elf/dfx_jit_debug.cpp",
@@ -46,7 +47,6 @@ dfx_unwinder_sources = [
   "src/utils/stack_utils.cpp",
   "src/utils/unwinder_config.cpp",
   "unwinder.cpp",
-  "unwinder_art.cpp",
 ]
 
 dfx_exidx_sources = [ "src/unwind_entry_parser/exidx_entry_parser.cpp" ]
