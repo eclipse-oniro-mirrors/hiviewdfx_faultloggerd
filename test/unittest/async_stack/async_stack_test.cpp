@@ -1007,5 +1007,24 @@ HWTEST_F(AsyncStackTest, AsyncStackTest020, TestSize.Level3)
     GTEST_LOG_(INFO) << "AsyncStackTest020: end.";
 #endif
 }
+
+/**
+ * @tc.name: AsyncStackTest021
+ * @tc.desc: test DfxExchangeSampleMode
+ * @tc.type: FUNC
+ */
+HWTEST_F(AsyncStackTest, AsyncStackTest021, TestSize.Level2)
+{
+#if defined(__aarch64__)
+    GTEST_LOG_(INFO) << "AsyncStackTest021: start.";
+    SampleMode lastMode = DfxExchangeSampleMode(SAMPLE_MODE_NONE);
+    ASSERT_TRUE(lastMode == SAMPLE_MODE_NONE || lastMode == SAMPLE_MODE_FULL ||
+        lastMode == SAMPLE_MODE_SAMPLED);
+    SampleMode currentMode = DfxExchangeSampleMode(lastMode);
+    ASSERT_EQ(currentMode, SAMPLE_MODE_NONE);
+    GTEST_LOG_(INFO) << "AsyncStackTest021: lastMode=" << static_cast<int>(lastMode);
+    GTEST_LOG_(INFO) << "AsyncStackTest021: end.";
+#endif
+}
 } // namespace HiviewDFX
 } // namespace OHOS
