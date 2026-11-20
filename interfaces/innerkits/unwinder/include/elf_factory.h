@@ -16,11 +16,15 @@
 #ifndef ELF_FACTORY_H
 #define ELF_FACTORY_H
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <utility>
+#include <vector>
 #include "dfx_define.h"
 #include "dfx_elf.h"
 #include "dfx_map.h"
+#include "dfx_mmap.h"
 
 namespace OHOS {
 namespace HiviewDFX {
@@ -40,11 +44,14 @@ private:
 };
 
 #if defined(ENABLE_MINIDEBUGINFO)
+// ChunkBlk/ChunkIndex/BlockProvider are defined in dfx_mmap.h (the paged mapping's
+// block source); MiniDebugInfoFactory builds the index and constructs the provider.
 class MiniDebugInfoFactory : public ElfFactory {
 public:
     explicit MiniDebugInfoFactory(const GnuDebugDataHdr& gnuDebugDataHdr) : gnuDebugDataHdr_(gnuDebugDataHdr) {}
     ~MiniDebugInfoFactory() override = default;
     std::shared_ptr<DfxElf> Create() override;
+    ChunkIndex BuildChunkIndex(const uint8_t *src, size_t srcLen);
 private:
     bool XzDecompress(const uint8_t *src, size_t srcLen, std::vector<uint8_t>& out);
     GnuDebugDataHdr gnuDebugDataHdr_{};

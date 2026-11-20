@@ -33,6 +33,7 @@ ohos_unittest("test_unwind") {
   sources = [
     "ark_test.cpp",
     "dfx_frame_formatter_test.cpp",
+    "dfx_mmap_test.cpp",
     "elf_crafted_test.cpp",
     "elf_factory_test.cpp",
     "elf_imitate.cpp",
