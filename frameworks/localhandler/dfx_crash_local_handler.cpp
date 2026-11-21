@@ -160,7 +160,7 @@ void CrashLocalHandlerFd(const int fd, struct ProcessDumpRequest* request)
     collector.SetPid(request->pid);
     PrintLog("Pid:%d\n", request->pid);
     collector.SetUid(request->uid);
-    PrintLog("Uid:%d\n", request->uid);
+    PrintLog("Uid:%u\n", request->uid);
     collector.SetPname(request->processName);
     PrintLog("Process name:%s\n", request->processName);
     if (request->siginfo.si_pid == request->pid) {

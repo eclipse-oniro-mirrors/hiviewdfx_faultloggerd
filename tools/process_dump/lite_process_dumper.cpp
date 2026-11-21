@@ -485,7 +485,7 @@ void LiteProcessDumper::PrintHeader()
     CppCrashInfoCollector::Instance().SetTimestamp(tempStr);
     headInfo += StringPrintf("Pid:%d\n", request_.pid);
     CppCrashInfoCollector::Instance().SetPid(request_.pid);
-    headInfo += StringPrintf("Uid:%d\n", request_.uid);
+    headInfo += StringPrintf("Uid:%u\n", request_.uid);
     CppCrashInfoCollector::Instance().SetUid(request_.uid);
     headInfo += StringPrintf("Process name:%s\n", request_.processName);
     CppCrashInfoCollector::Instance().SetPname(request_.processName);
