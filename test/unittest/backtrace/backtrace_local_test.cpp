@@ -799,5 +799,134 @@ HWTEST_F(BacktraceLocalTest, BacktraceLocalTest022, TestSize.Level2)
         GTEST_LOG_(INFO) << "BacktraceLocalTest022: end.";
     }
 }
+
+/**
+ * @tc.name: BacktraceLocalTest023
+ * @tc.desc: test SanitizerDwarfUnwind normal case
+ * @tc.type: FUNC
+ */
+HWTEST_F(BacktraceLocalTest, BacktraceLocalTest023, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "BacktraceLocalTest023: start.";
+    constexpr size_t maxDepth = 64;
+    void* pcs[maxDepth] = { nullptr };
+    size_t realDepth = 0;
+    bool ret = SanitizerDwarfUnwind(pcs, maxDepth, &realDepth);
+    ASSERT_TRUE(ret);
+    ASSERT_GT(realDepth, 0);
+    ASSERT_LE(realDepth, maxDepth);
+    for (size_t i = 0; i < realDepth; ++i) {
+        ASSERT_NE(pcs[i], nullptr);
+    }
+    GTEST_LOG_(INFO) << "SanitizerDwarfUnwind realDepth: " << realDepth;
+    GTEST_LOG_(INFO) << "BacktraceLocalTest023: end.";
+}
+
+/**
+ * @tc.name: BacktraceLocalTest024
+ * @tc.desc: test SanitizerDwarfUnwind with null pcs
+ * @tc.type: FUNC
+ */
+HWTEST_F(BacktraceLocalTest, BacktraceLocalTest024, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "BacktraceLocalTest024: start.";
+    size_t realDepth = 1;
+    bool ret = SanitizerDwarfUnwind(nullptr, 64, &realDepth);
+    ASSERT_FALSE(ret);
+    ASSERT_EQ(realDepth, 0);
+    GTEST_LOG_(INFO) << "BacktraceLocalTest024: end.";
+}
+
+/**
+ * @tc.name: BacktraceLocalTest025
+ * @tc.desc: test SanitizerDwarfUnwind with zero maxDepth
+ * @tc.type: FUNC
+ */
+HWTEST_F(BacktraceLocalTest, BacktraceLocalTest025, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "BacktraceLocalTest025: start.";
+    void* pcs[1] = { nullptr };
+    size_t realDepth = 1;
+    bool ret = SanitizerDwarfUnwind(pcs, 0, &realDepth);
+    ASSERT_FALSE(ret);
+    ASSERT_EQ(realDepth, 0);
+    GTEST_LOG_(INFO) << "BacktraceLocalTest025: end.";
+}
+
+/**
+ * @tc.name: BacktraceLocalTest026
+ * @tc.desc: test SanitizerDwarfUnwind with null realDepth
+ * @tc.type: FUNC
+ */
+HWTEST_F(BacktraceLocalTest, BacktraceLocalTest026, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "BacktraceLocalTest026: start.";
+    constexpr size_t maxDepth = 64;
+    void* pcs[maxDepth] = { nullptr };
+    bool ret = SanitizerDwarfUnwind(pcs, maxDepth, nullptr);
+    ASSERT_FALSE(ret);
+    GTEST_LOG_(INFO) << "BacktraceLocalTest026: end.";
+}
+
+/**
+ * @tc.name: BacktraceLocalTest027
+ * @tc.desc: test SanitizerDwarfUnwind with maxDepth limit
+ * @tc.type: FUNC
+ */
+HWTEST_F(BacktraceLocalTest, BacktraceLocalTest027, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "BacktraceLocalTest027: start.";
+    constexpr size_t smallMaxDepth = 2;
+    void* pcs[smallMaxDepth] = { nullptr };
+    size_t realDepth = 0;
+    bool ret = SanitizerDwarfUnwind(pcs, smallMaxDepth, &realDepth);
+    ASSERT_TRUE(ret);
+    ASSERT_GT(realDepth, 0);
+    ASSERT_LE(realDepth, smallMaxDepth);
+    for (size_t i = 0; i < realDepth; ++i) {
+        ASSERT_NE(pcs[i], nullptr);
+    }
+    GTEST_LOG_(INFO) << "SanitizerDwarfUnwind realDepth: " << realDepth;
+    GTEST_LOG_(INFO) << "BacktraceLocalTest027: end.";
+}
+
+/**
+ * @tc.name: BacktraceLocalTest028
+ * @tc.desc: test SanitizerDwarfUnwind all params null
+ * @tc.type: FUNC
+ */
+HWTEST_F(BacktraceLocalTest, BacktraceLocalTest028, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "BacktraceLocalTest028: start.";
+    bool ret = SanitizerDwarfUnwind(nullptr, 0, nullptr);
+    ASSERT_FALSE(ret);
+    GTEST_LOG_(INFO) << "BacktraceLocalTest028: end.";
+}
+
+/**
+ * @tc.name: BacktraceLocalTest029
+ * @tc.desc: test SanitizerDwarfUnwind consistency with GetBacktrace
+ * @tc.type: FUNC
+ */
+HWTEST_F(BacktraceLocalTest, BacktraceLocalTest029, TestSize.Level2)
+{
+    GTEST_LOG_(INFO) << "BacktraceLocalTest029: start.";
+    constexpr size_t maxDepth = 64;
+    void* pcs[maxDepth] = { nullptr };
+    size_t realDepth = 0;
+    bool ret = SanitizerDwarfUnwind(pcs, maxDepth, &realDepth);
+    ASSERT_TRUE(ret);
+    ASSERT_GT(realDepth, 0);
+    for (size_t i = 0; i < realDepth; ++i) {
+        ASSERT_NE(pcs[i], nullptr);
+    }
+    std::string backtraceStr;
+    ASSERT_TRUE(GetBacktrace(backtraceStr, false, maxDepth));
+    ASSERT_GT(backtraceStr.size(), 0);
+    ASSERT_TRUE(backtraceStr.find("#00") != std::string::npos);
+    GTEST_LOG_(INFO) << "SanitizerDwarfUnwind realDepth: " << realDepth;
+    GTEST_LOG_(INFO) << "GetBacktrace:\n" << backtraceStr;
+    GTEST_LOG_(INFO) << "BacktraceLocalTest029: end.";
+}
 } // namespace HiviewDFX
 } // namepsace OHOS
