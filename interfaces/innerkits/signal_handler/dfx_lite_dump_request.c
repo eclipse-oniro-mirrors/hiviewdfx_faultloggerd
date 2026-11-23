@@ -81,6 +81,8 @@ static _Atomic(int) g_threadStartCount = 0;
 #endif
 static _Atomic(int) g_threadCompletedCount = 0;
 static int g_threadSentCount = 0;
+// Set when the collect wait ends, so late SIGLOCAL_DUMP handlers skip the possibly unmapped buffer.
+static _Atomic(bool) g_waitCollectEnd = false;
 static const int LOCALDUMP_TIMEOUT = 1000; // 1000 : 1 sec timeout
 
 static unsigned int g_totalMemorySize = 0;
@@ -194,6 +196,7 @@ bool CollectOtherThreadStack(const struct ProcessDumpRequest *request)
     InitSignalHandler();
     SignalRequestThread(request);
     int threadCompletedCount = WaitTimeout(LOCALDUMP_TIMEOUT);
+    g_waitCollectEnd = true;
     int *cnt = (int*)((char*)g_mmapSpace + g_mmapPos);
     *cnt = threadCompletedCount;
 
@@ -274,6 +277,10 @@ void DfxBacktraceLocalSignalHandler(int sig, siginfo_t *si, void *context)
     if (si == NULL || context == NULL) {
         return;
     }
+    // The collect wait has ended and the buffer may be unmapped; a late signal must not write through MAP_FAILED.
+    if (g_waitCollectEnd) {
+        return;
+    }
 
 #if defined(__aarch64__)
     int pos = atomic_fetch_add(&g_threadStartCount, 1);
@@ -320,6 +327,7 @@ void InitSignalHandler()
     g_threadStartCount = 0;
 #endif
     g_threadCompletedCount = 0;
+    g_waitCollectEnd = false;
 }
 
 bool CollectStat(const struct ProcessDumpRequest *request)
