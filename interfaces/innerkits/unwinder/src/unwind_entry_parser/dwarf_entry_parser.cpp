@@ -131,23 +131,22 @@ const std::vector<DwarfEntryParser::FdeIndexEntry>* DwarfEntryParser::BuildFdeIn
         uintptr_t entryPtr = ptr;
         bool isCieEntry = false;
         ParseCieOrFdeHeader(entryPtr, fdeInfo, isCieEntry);
-        bool ok;
+        bool isParseSuccess = false;
         if (isCieEntry) {
-            ok = ParseCie(fdeAddr, entryPtr, fdeInfo.cie);
+            isParseSuccess = ParseCie(fdeAddr, entryPtr, fdeInfo.cie);
         } else {
-            ok = ParseFde(fdeAddr, entryPtr, fdeInfo);
+            isParseSuccess = ParseFde(fdeAddr, entryPtr, fdeInfo);
         }
-        if (ok) {
-            if (!isCieEntry && fdeInfo.pcEnd > fdeInfo.pcStart) {
-                const FrameDescEntry* parsed = nullptr;
-                auto cached = fdeEntries_.find(fdeAddr);
-                if (cached != fdeEntries_.end()) {
-                    parsed = &cached->second;
-                }
-                entries.push_back({fdeInfo.pcStart, fdeInfo.pcEnd, fdeAddr, parsed});
-            }
-        } else {
+        if (!isParseSuccess) {
             break;
+        }
+        if (!isCieEntry && fdeInfo.pcEnd > fdeInfo.pcStart) {
+            const FrameDescEntry* parsed = nullptr;
+            auto cached = fdeEntries_.find(fdeAddr);
+            if (cached != fdeEntries_.end()) {
+                parsed = &cached->second;
+            }
+            entries.push_back({fdeInfo.pcStart, fdeInfo.pcEnd, fdeAddr, parsed});
         }
         ptr = isCieEntry ? fdeInfo.cie.instructionsEnd : fdeInfo.instructionsEnd;
     }
@@ -424,7 +423,7 @@ bool DwarfEntryParser::FillInFde(uintptr_t ptr, FrameDescEntry& fdeInfo)
         uintptr_t instructionsPtr;
         if (__builtin_add_overflow(ptr, augLen, &instructionsPtr) ||
             (fdeInfo.instructionsEnd != 0 && instructionsPtr > fdeInfo.instructionsEnd)) {
-            DFXLOGE("Invalid augmentation length in fde.");
+            DFXLOGU("Invalid augmentation length in fde.");
             lastErrorData_.SetAddrAndCode(ptr, UNW_ERROR_INVALID_MEMORY);
             return false;
         }

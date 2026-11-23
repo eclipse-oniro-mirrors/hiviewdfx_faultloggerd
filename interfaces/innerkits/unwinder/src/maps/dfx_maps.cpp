@@ -110,7 +110,6 @@ bool DfxMaps::Create(const pid_t pid, std::vector<std::shared_ptr<DfxMap>>& maps
     }
     auto dfxMaps = std::make_shared<DfxMaps>();
     dfxMaps->EnableMapIndex(true);
-    dfxMaps->isFormatPath_ = false;
     if (!dfxMaps->Parse(pid, path)) {
         return false;
     }
