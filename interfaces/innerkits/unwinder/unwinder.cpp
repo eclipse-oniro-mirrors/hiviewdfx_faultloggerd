@@ -816,6 +816,8 @@ bool Unwinder::Impl::StepArkJsFrame(StepFrame& frame, uint64_t frameIndex)
             reinterpret_cast<void *>(frame.fp), reinterpret_cast<void *>(frame.sp), frame.isJsFrame);
     }
 
+    bool isLocalUnwind = (pid_ == UNWIND_TYPE_LOCAL) || (pid_ == UNWIND_TYPE_CUSTOMIZE_LOCAL);
+    StackCheckGuard guard(context_, isLocalUnwind);
     int ret = -1;
     if (isJitCrash_) {
         MAYBE_UNUSED uintptr_t methodId = 0;
@@ -983,8 +985,6 @@ int Unwinder::Impl::UnwindArkFrameByFp(StepFrame& frame, const ArkMapRange& arkM
         frame.frameType = FrameType::STATIC_JS_FRAME;
         frameIndex = 0;
     }
-    bool isLocalUnwind = (pid_ == UNWIND_TYPE_LOCAL) || (pid_ == UNWIND_TYPE_CUSTOMIZE_LOCAL);
-    StackCheckGuard guard(context_, isLocalUnwind);
     if (!StepArkJsFrame(frame, frameIndex)) {
         DFXLOGE("Failed to step ark Js frame, pc: %{private}p", reinterpret_cast<void *>(frame.pc));
         lastErrorData_.SetAddrAndCode(frame.pc, UNW_ERROR_STEP_ARK_FRAME);
@@ -1169,7 +1169,6 @@ bool Unwinder::Impl::UnwindArkFrame(StepFrame& frame, const std::shared_ptr<DfxM
     if (!enableMixstack_ || map == nullptr) {
         return true;
     }
-    StackCheckGuard guard(context_);
     if (map->IsStaticArkExecutable() || frame.frameType == FrameType::STATIC_JS_FRAME) {
         static uint64_t frameIndex = 0;
         if (map->IsStaticArkExecutable()) {
