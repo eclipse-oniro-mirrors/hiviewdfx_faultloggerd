@@ -89,7 +89,7 @@ void MinidumpDumper::CollectDumpHeaderInfo(int pid)
     request_.timeStamp = GetTimeMilliSeconds();
     request_.pid = pid;
     request_.nsPid = pid;
-    request_.uid = UINT32_MAX;
+    request_.uid = INT32_MAX;
     long uid = 0;
     uint64_t sigBlk = 0;
     if (GetUidAndSigBlk(pid, uid, sigBlk) && uid > 0) {
