@@ -1161,6 +1161,60 @@ HWTEST_F(SignalHandlerTest, DfxLiteDumperTest004, TestSize.Level2)
     std::vector<uint8_t> vec(totalSize);
     EXPECT_EQ(read(g_pipeFd[PIPE_READ], vec.data(), vec.size()), totalSize);
 }
+
+static std::atomic<bool> g_liteDumpBlockReady(false);
+static std::atomic<bool> g_liteDumpBlockRelease(false);
+
+static void LiteDumpBlockedSignalThread()
+{
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGLOCAL_DUMP);
+    pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+    g_liteDumpBlockReady.store(true);
+    while (!g_liteDumpBlockRelease.load()) {
+        usleep(1000); // 1000 : 1ms poll
+    }
+    // Deliver the pending SIGLOCAL_DUMP only after the shared buffer has been unmapped.
+    pthread_sigmask(SIG_UNBLOCK, &mask, nullptr);
+}
+
+/**
+ * @tc.name: DfxLiteDumperTest012
+ * @tc.desc: collect timeout then unmap, late SIGLOCAL_DUMP on a blocked thread must not crash
+ * @tc.type: FUNC
+ */
+HWTEST_F(SignalHandlerTest, DfxLiteDumperTest012, TestSize.Level2)
+{
+    constexpr int collectTimeoutMs = 1000; // 1000 : keep in sync with LOCALDUMP_TIMEOUT (1s)
+    int mmapSize = PRIV_COPY_STACK_BUFFER_SIZE +
+        sizeof(int) + MAX_DUMP_THREAD_NUM * (sizeof(ThreadDumpRequest) + THREAD_STACK_BUFFER_SIZE);
+    ASSERT_TRUE(MMapMemoryOnce(mmapSize));
+
+    ProcessDumpRequest request {};
+    request.pid = getpid();
+    request.tid = gettid();
+    g_liteDumpBlockReady.store(false);
+    g_liteDumpBlockRelease.store(false);
+    std::thread blockedThread(LiteDumpBlockedSignalThread);
+    while (!g_liteDumpBlockReady.load()) {
+        usleep(1000); // 1000 : 1ms poll
+    }
+
+    // The blocked thread cannot respond in time, so WaitTimeout must time out.
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_TRUE(CollectStack(&request));
+    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    EXPECT_GE(elapsedMs, collectTimeoutMs);
+    UnmapMemoryOnce(mmapSize);
+
+    // Without the timeout guard the late handler writes through MAP_FAILED and crashes the process.
+    g_liteDumpBlockRelease.store(true);
+    blockedThread.join();
+    SUCCEED() << "late SIGLOCAL_DUMP after unmap handled without crash";
+    InitSignalHandler(); // reset round state for subsequent tests
+}
 #endif
 
 /**
