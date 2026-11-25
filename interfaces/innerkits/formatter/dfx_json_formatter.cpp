@@ -211,15 +211,16 @@ bool GetArgCanvas(uintptr_t &start, uintptr_t &end)
         return false;
     }
     p++;
-    while (*p == ' ') {
+    const char *bufEnd = buf + sizeof(buf) - 1;
+    while (p < bufEnd && *p == ' ') {
         p++;
     }
-    while (*p != ' ' && *p != '\0') {
+    while (p < bufEnd && *p != ' ' && *p != '\0') {
         p++;  // skip the state field (field 3, a letter)
     }
     int field = 4;
     while (*p != '\0' && field <= STAT_FIELD_ARG_END) {
-        while (*p == ' ') {
+        while (p < bufEnd && *p == ' ') {
             p++;
         }
         if (*p == '\0') {
