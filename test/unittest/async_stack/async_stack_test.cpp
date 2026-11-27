@@ -44,11 +44,16 @@ using namespace testing::ext;
 namespace {
 using CollectFn = uint64_t(*)(uint64_t);
 using SetFn = void(*)(uint64_t);
+using ReleaseFn = void(*)(uint64_t);
 
 std::atomic<int> g_eventHandlerSetCalls {0};
 std::atomic<int> g_eventHandlerClearCalls {0};
 CollectFn g_lastEventHandlerCollect = nullptr;
 SetFn g_lastEventHandlerSetId = nullptr;
+std::atomic<int> g_eventReleaseCalls {0};
+std::atomic<int> g_ffrtReleaseCalls {0};
+ReleaseFn g_lastEventRelease = nullptr;
+ReleaseFn g_lastFfrtRelease = nullptr;
 
 void ResetCallbackProbeState()
 {
@@ -56,6 +61,10 @@ void ResetCallbackProbeState()
     g_eventHandlerClearCalls.store(0);
     g_lastEventHandlerCollect = nullptr;
     g_lastEventHandlerSetId = nullptr;
+    g_eventReleaseCalls.store(0);
+    g_ffrtReleaseCalls.store(0);
+    g_lastEventRelease = nullptr;
+    g_lastFfrtRelease = nullptr;
 }
 } // namespace
 
@@ -70,6 +79,18 @@ extern "C" __attribute__((visibility("default"))) void EventSetAsyncStackFunc(
     } else {
         g_eventHandlerSetCalls.fetch_add(1);
     }
+}
+
+extern "C" __attribute__((visibility("default"))) void EventSetReleaseAsyncStackFunc(ReleaseFn releaseFn)
+{
+    g_lastEventRelease = releaseFn;
+    g_eventReleaseCalls.fetch_add(1);
+}
+
+extern "C" __attribute__((visibility("default"))) void FFRTSetAsyncStackReleaseFunc(ReleaseFn releaseFn)
+{
+    g_lastFfrtRelease = releaseFn;
+    g_ffrtReleaseCalls.fetch_add(1);
 }
 #endif
 
@@ -1024,6 +1045,40 @@ HWTEST_F(AsyncStackTest, AsyncStackTest021, TestSize.Level2)
     ASSERT_EQ(currentMode, SAMPLE_MODE_NONE);
     GTEST_LOG_(INFO) << "AsyncStackTest021: lastMode=" << static_cast<int>(lastMode);
     GTEST_LOG_(INFO) << "AsyncStackTest021: end.";
+#endif
+}
+
+/**
+ * @tc.name: AsyncStackTest022
+ * @tc.desc: test chained mode registers dlsym-resolved release callbacks and early-return branch
+ * @tc.type: FUNC
+ */
+HWTEST_F(AsyncStackTest, AsyncStackTest022, TestSize.Level2)
+{
+#if defined(__aarch64__)
+    GTEST_LOG_(INFO) << "AsyncStackTest022: start.";
+    DfxInitAsyncStack();
+    SetAsyncStackMode(MODE_LAST_STACKTRACE);
+    // libuv provides the uv hooks; Event/FFRT release hooks resolve to fakes in this binary.
+    ASSERT_NE(dlsym(RTLD_DEFAULT, "LibuvSetAsyncStackFunc"), nullptr);
+    ASSERT_NE(dlsym(RTLD_DEFAULT, "LibuvSetReleaseAsyncContextFunc"), nullptr);
+
+    ResetCallbackProbeState();
+    DfxAsyncMode prev = SetAsyncStackMode(MODE_CHAINED_STACKTRACE);
+    ASSERT_EQ(prev, MODE_LAST_STACKTRACE);
+    ASSERT_EQ(GetAsyncStackMode(), MODE_CHAINED_STACKTRACE);
+    ASSERT_EQ(g_eventReleaseCalls.load(), 1);
+    ASSERT_EQ(g_lastEventRelease, &ReleaseAsyncContext);
+    ASSERT_EQ(g_ffrtReleaseCalls.load(), 1);
+    ASSERT_EQ(g_lastFfrtRelease, &ReleaseAsyncContext);
+
+    // same-mode switch takes the early-return branch without re-registering callbacks
+    ASSERT_EQ(SetAsyncStackMode(MODE_CHAINED_STACKTRACE), MODE_CHAINED_STACKTRACE);
+    ASSERT_EQ(g_eventReleaseCalls.load(), 1);
+    ASSERT_EQ(g_ffrtReleaseCalls.load(), 1);
+
+    SetAsyncStackMode(MODE_LAST_STACKTRACE);
+    GTEST_LOG_(INFO) << "AsyncStackTest022: end.";
 #endif
 }
 } // namespace HiviewDFX

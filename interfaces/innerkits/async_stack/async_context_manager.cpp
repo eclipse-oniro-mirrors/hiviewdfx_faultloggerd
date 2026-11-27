@@ -45,7 +45,6 @@ bool DfxAsyncContextPool::Init()
     if (initialized_.load()) {
         return true;
     }
-    DFXLOGI("init async context pool");
     poolSize_ = GetChainPoolSize();
     if (poolSize_ == 0) {
         DFXLOGE("init async context pool invalid poolSize %{public}u", poolSize_);
@@ -419,7 +418,7 @@ bool DfxAsyncContextManager::RecycleAsyncContext(DfxAsyncContext* ctx)
         return false;
     }
     if (!IsValidAsyncContext(ctx)) {
-        DFXLOGW("RecycleAsyncContext ctx invalid");
+        DFXLOGD("RecycleAsyncContext ctx invalid");
         return false;
     }
     DfxAsyncContextPool::Instance()->ReleaseAsyncContext(ctx);

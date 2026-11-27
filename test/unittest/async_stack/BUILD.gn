@@ -48,7 +48,22 @@ ohos_unittest("async_stack_test") {
   ]
 }
 
+ohos_unittest("async_stack_unset_callback_test") {
+  module_out_path = module_output_path
+  visibility = [ "*:*" ]
+  sources = [ "async_stack_unset_callback_test.cpp" ]
+  deps = [
+    "$faultloggerd_interfaces_path/innerkits/async_stack:libasync_stack",
+  ]
+  external_deps = [
+    "googletest:gtest_main",
+  ]
+}
+
 group("unittest") {
   testonly = true
-  deps = [ ":async_stack_test" ]
+  deps = [
+    ":async_stack_test",
+    ":async_stack_unset_callback_test",
+  ]
 }
