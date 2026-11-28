@@ -200,6 +200,41 @@ void SetAsyncStackCallback(const AsyncCallback& callback,
     }
 }
 
+std::string SetChainedModeCallbacks()
+{
+    std::string logSuffix;
+    const auto appendUnset = [&logSuffix](const char* callbackName) {
+        if (logSuffix.empty()) {
+            logSuffix.append(", unset callbacks: ");
+        } else {
+            logSuffix.push_back(',');
+        }
+        logSuffix.append(callbackName);
+    };
+    const auto setReleaseCallback = [&appendUnset](const char* funcName, const char* labelName) {
+        auto releaseFunc = reinterpret_cast<GenericSetReleaseAsyncStackFn>(dlsym(RTLD_DEFAULT, funcName));
+        if (releaseFunc != nullptr) {
+            releaseFunc(ReleaseAsyncContext);
+        } else {
+            appendUnset(labelName);
+        }
+    };
+
+    setReleaseCallback("EventSetReleaseAsyncStackFunc", "EventRelease");
+    setReleaseCallback("LibuvSetReleaseAsyncContextFunc", "LibuvRelease");
+
+    auto uvSetAsyncStackFn =
+        reinterpret_cast<GenericSetAsyncStackFn>(dlsym(RTLD_DEFAULT, "LibuvSetAsyncStackFunc"));
+    if (uvSetAsyncStackFn == nullptr) {
+        appendUnset("LibuvCollect");
+    } else {
+        uvSetAsyncStackFn(DfxCollectAsyncStack, DfxSetSubmitterStackId);
+    }
+
+    setReleaseCallback("FFRTSetAsyncStackReleaseFunc", "FfrtRelease");
+    return logSuffix;
+}
+
 void UpdateAsyncStackCallbacks(uint64_t lastType, uint64_t currentType)
 {
     static const AsyncCallback callbacks[] = {
@@ -232,49 +267,20 @@ extern "C" DfxAsyncMode SetAsyncStackMode(DfxAsyncMode mode)
         return g_mode.load();
     }
 
+    std::string logSuffix;
     if (mode == MODE_CHAINED_STACKTRACE) {
         if (!DfxAsyncContextManager::Instance()->Init()) {
             DFXLOGE("SetAsyncStackMode init async context manager failed");
             return g_mode.load();
         }
-        auto releaseFuncEH =
-        reinterpret_cast<GenericSetReleaseAsyncStackFn>(dlsym(RTLD_DEFAULT, "EventSetReleaseAsyncStackFunc"));
-        if (releaseFuncEH != nullptr) {
-            releaseFuncEH(ReleaseAsyncContext);
-        } else {
-            DFXLOGE("failed to set EventSetReleaseAsyncContext.");
-        }
-
-        auto releaseFuncUV =
-            reinterpret_cast<GenericSetReleaseAsyncStackFn>(dlsym(RTLD_DEFAULT, "LibuvSetReleaseAsyncContextFunc"));
-        if (releaseFuncUV != nullptr) {
-            releaseFuncUV(ReleaseAsyncContext);
-        } else {
-            DFXLOGE("failed to set LibuvSetReleaseAsyncContextFunc.");
-        }
-
-        auto uvSetAsyncStackFn =
-            reinterpret_cast<GenericSetAsyncStackFn>(dlsym(RTLD_DEFAULT, "LibuvSetAsyncStackFunc"));
-        if (uvSetAsyncStackFn != nullptr) {
-            uvSetAsyncStackFn(DfxCollectAsyncStack, DfxSetSubmitterStackId);
-        } else {
-            DFXLOGE("failed to set LibuvSetAsyncStackFunc.");
-        }
-
-        auto releaseFuncFFRT =
-            reinterpret_cast<GenericSetReleaseAsyncStackFn>(dlsym(RTLD_DEFAULT, "FFRTSetAsyncStackReleaseFunc"));
-        if (releaseFuncFFRT != nullptr) {
-            releaseFuncFFRT(ReleaseAsyncContext);
-        } else {
-            DFXLOGE("failed to set FFRTSetAsyncStackReleaseFunc.");
-        }
+        logSuffix = SetChainedModeCallbacks();
         UpdateAsyncStackCallbacks(0, g_enabledAsyncType);
     } else {
         DfxAsyncContextManager::Instance()->DeInit();
     }
     DfxAsyncMode prev = g_mode.load();
     g_mode.store(mode);
-    DFXLOGI("SetAsyncStackMode %{public}d", static_cast<int>(g_mode.load()));
+    DFXLOGI("SetAsyncStackMode %{public}d%{public}s", static_cast<int>(g_mode.load()), logSuffix.c_str());
     return prev;
 }
 
@@ -439,8 +445,11 @@ static bool InitAsyncStack(bool isDebugApp, bool allowArkDlopen)
     }
     g_fpBacktrace = std::unique_ptr<OHOS::HiviewDFX::FpBacktrace>(
         OHOS::HiviewDFX::FpBacktrace::CreateInstance(allowArkDlopen));
-    g_sampleMode.store(GetSampleMode(isDebugApp));
-    DFXLOGI("Init async stack, sample mode: %{public}d", static_cast<int>(g_sampleMode.load()));
+    SampleMode sampleMode = GetSampleMode(isDebugApp);
+    g_sampleMode.store(sampleMode);
+    if (sampleMode != SAMPLE_MODE_FULL) {
+        DFXLOGI("Init async stack, sample mode: %{public}d", static_cast<int>(sampleMode));
+    }
     DfxSetAsyncStackCallback(isDebugApp);
     g_init.store(true);
 #endif

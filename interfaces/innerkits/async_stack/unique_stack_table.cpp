@@ -113,11 +113,8 @@ bool UniqueStackTable::InitWithExternalBuffer(void* buffer, size_t size)
     stackTable_.hashStep = (stackTable_.totalNodes / (deconflictTimes_ * 2 + 1)); // 2 : double times
     stackTable_.tableBufMMap = buffer;
     stackTable_.tableSize = size;
-    DFXLOGI(
-        "InitWithExternalBuffer totalNodes_: %{public}u, availableNodes_: %{public}u, availableIndex_: %{public}u \
-        hashStep_: %{public}" PRIu64 ", hashModulus_: %{public}u",
-        stackTable_.totalNodes, stackTable_.availableNodes, stackTable_.availableIndex,
-        stackTable_.hashStep, stackTable_.hashModulus);
+    DFXLOGI("InitWithExternalBuffer size: %{public}zu, totalNodes: %{public}u, hashStep: %{public}" PRIu64,
+        size, stackTable_.totalNodes, stackTable_.hashStep);
     profilerInit_ = true;
     return true;
 }
