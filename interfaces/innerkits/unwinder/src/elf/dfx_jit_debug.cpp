@@ -167,7 +167,7 @@ DfxJitDebug::JitDescriptorStatus DfxJitDebug::FindJitDescriptor()
     }
 
     if (maps_ == nullptr) {
-        DFXLOGE("FindJitDescriptor: maps is null");
+        DFXLOGU("FindJitDescriptor: maps is null");
         return JitDescriptorStatus::RETRY_LATER;
     }
 
@@ -351,7 +351,7 @@ bool DfxJitDebug::LoadJitElf(uint64_t addr, uint64_t size, std::shared_ptr<DfxEl
 
     elf = std::make_shared<DfxElf>(mmap);
     if (!elf->IsValid()) {
-        DFXLOGE("JIT ELF is not valid");
+        DFXLOGU("JIT ELF is not valid");
         elf = nullptr;
         return false;
     }
@@ -425,11 +425,11 @@ bool DfxJitDebug::ResolveEntryElf(const JitUID& uid, const JitCodeEntry& data,
         entries->emplace(uid, it->second);
     } else if (data.symfileAddr != 0) {
         std::shared_ptr<DfxElf> elf;
-        bool ok = LoadJitElf(data.symfileAddr, data.symfileSize, elf, uid);
+        bool isElfLoaded = LoadJitElf(data.symfileAddr, data.symfileSize, elf, uid);
         if (!CheckSeqlock(uid, race)) {
             return false;
         }
-        if (ok) {
+        if (isElfLoaded) {
             entries->emplace(uid, elf);
         }
     }
@@ -447,12 +447,11 @@ bool DfxJitDebug::ReadNewEntries(std::map<JitUID, std::shared_ptr<DfxElf>>* entr
     size_t steps = 0;
     while (uid.address != 0) {
         if (++steps > MAX_JIT_WALK_ENTRIES) {
-            DFXLOGE("ReadNewEntries: entry budget %{public}zu exhausted", MAX_JIT_WALK_ENTRIES);
+            DFXLOGU("ReadNewEntries: entry budget %{public}zu exhausted", MAX_JIT_WALK_ENTRIES);
             return false;
         }
         if (visited.size() < MAX_JIT_VISITED_ENTRIES &&
             !visited.insert(StripAddressTag(uid.address)).second) {
-            DFXLOGE("ReadNewEntries: cyclic entry list at 0x%{public}" PRIx64 "", uid.address);
             return false;
         }
         if (entries->find(uid) != entries->end()) {
